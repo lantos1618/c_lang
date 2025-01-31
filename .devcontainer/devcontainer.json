@@ -1,0 +1,29 @@
+{
+    "name": "Rust Development",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "serayuzgur.crates",
+                "tamasfe.even-better-toml",
+                "vadimcn.vscode-lldb"
+            ],
+            "settings": {
+                "editor.formatOnSave": true,
+                "rust-analyzer.checkOnSave.command": "clippy"
+            }
+        }
+    },
+    "remoteUser": "vscode",
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "configureZshAsDefaultShell": true,
+            "installOhMyZsh": true
+        },
+        "ghcr.io/devcontainers/features/git:1": {}
+    }
+} 
