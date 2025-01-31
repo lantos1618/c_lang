@@ -1,5 +1,5 @@
-pub mod ast;
-pub mod writer;
+pub mod c_ast;
+pub mod c_writer;
 
-pub use ast::*;
-pub use writer::*;
+pub use c_ast::*;
+pub use c_writer::*;

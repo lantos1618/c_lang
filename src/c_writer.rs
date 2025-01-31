@@ -1,4 +1,4 @@
-`use crate::ast::*;
+use crate::c_ast::*;
 use std::fmt::Write;
 
 pub struct CWriter {
@@ -90,6 +90,76 @@ impl CWriter {
                 }
                 self.output.push_str(";\n");
             }
+            CDecl::StructDef(def) => {
+                self.output.push_str("struct ");
+                self.output.push_str(&def.name);
+                self.output.push_str(" {\n");
+                self.indent_level += 1;
+                for member in &def.members {
+                    self.indent();
+                    self.write_type(&member.ty);
+                    self.output.push(' ');
+                    self.output.push_str(&member.name);
+                    if let CType::Array(_, size_opt) = &member.ty {
+                        if let Some(size) = size_opt {
+                            write!(self.output, "[{}]", size).unwrap();
+                        } else {
+                            self.output.push_str("[]");
+                        }
+                    }
+                    self.output.push_str(";\n");
+                }
+                self.indent_level -= 1;
+                self.indent();
+                self.output.push_str("};\n");
+            }
+            CDecl::UnionDef(def) => {
+                self.output.push_str("union ");
+                self.output.push_str(&def.name);
+                self.output.push_str(" {\n");
+                self.indent_level += 1;
+                for member in &def.members {
+                    self.indent();
+                    self.write_type(&member.ty);
+                    self.output.push(' ');
+                    self.output.push_str(&member.name);
+                    if let CType::Array(_, size_opt) = &member.ty {
+                        if let Some(size) = size_opt {
+                            write!(self.output, "[{}]", size).unwrap();
+                        } else {
+                            self.output.push_str("[]");
+                        }
+                    }
+                    self.output.push_str(";\n");
+                }
+                self.indent_level -= 1;
+                self.indent();
+                self.output.push_str("};\n");
+            }
+            CDecl::Typedef { name, ty } => {
+                self.output.push_str("typedef ");
+                self.write_type_specifier(ty);
+                self.output.push(' ');
+                self.output.push_str(name);
+                self.output.push_str(";\n");
+            }
+        }
+    }
+
+    fn write_type_specifier(&mut self, ty: &CTypeSpecifier) {
+        match ty {
+            CTypeSpecifier::Plain(t) => self.write_type(t),
+            CTypeSpecifier::Const(inner) => {
+                self.output.push_str("const ");
+                self.write_type_specifier(inner);
+            }
+            CTypeSpecifier::Volatile(inner) => {
+                self.output.push_str("volatile ");
+                self.write_type_specifier(inner);
+            }
+            CTypeSpecifier::Typedef(name) => {
+                self.output.push_str(name);
+            }
         }
     }
 
@@ -100,6 +170,13 @@ impl CWriter {
                 self.write_type(ty);
                 self.output.push(' ');
                 self.output.push_str(name);
+                if let CType::Array(_, size_opt) = ty {
+                    if let Some(size) = size_opt {
+                        write!(self.output, "[{}]", size).unwrap();
+                    } else {
+                        self.output.push_str("[]");
+                    }
+                }
                 if let Some(expr) = init {
                     self.output.push_str(" = ");
                     self.write_expr(expr);
@@ -128,13 +205,23 @@ impl CWriter {
                 self.indent();
                 self.output.push_str("if (");
                 self.write_expr(cond);
-                self.output.push_str(")\n");
-                self.write_nested_stmt(then_branch);
+                self.output.push_str(") {\n");
+                self.indent_level += 1;
+                self.write_stmt(then_branch);
+                self.indent_level -= 1;
+                self.indent();
+                self.output.push_str("}");
                 if let Some(else_stmt) = else_branch {
+                    self.output.push_str("\n");
                     self.indent();
-                    self.output.push_str("else\n");
-                    self.write_nested_stmt(else_stmt);
+                    self.output.push_str("else {\n");
+                    self.indent_level += 1;
+                    self.write_stmt(else_stmt);
+                    self.indent_level -= 1;
+                    self.indent();
+                    self.output.push_str("}");
                 }
+                self.output.push('\n');
             }
             CStmt::While { cond, body } => {
                 self.indent();
@@ -282,11 +369,17 @@ impl CWriter {
             }
             CExpr::Unary { op, expr } => {
                 match op {
-                    CUnaryOp::Neg => self.output.push('-'),
+                    CUnaryOp::Neg => self.output.push('('),
                     CUnaryOp::Not => self.output.push('!'),
                     CUnaryOp::Tilde => self.output.push('~'),
                 }
-                self.write_subexpr(expr);
+                if matches!(op, CUnaryOp::Neg) {
+                    self.output.push('-');
+                }
+                self.write_expr(expr);
+                if matches!(op, CUnaryOp::Neg) {
+                    self.output.push(')');
+                }
             }
             CExpr::Binary { op, lhs, rhs } => {
                 self.write_subexpr(lhs);
@@ -434,14 +527,208 @@ impl CWriter {
             CType::Enum(name) => {
                 write!(self.output, "enum {}", name).unwrap();
             }
-            CType::Array(inner, size_opt) => {
+            CType::Array(inner, _) => {
                 self.write_type(inner);
-                if let Some(size) = size_opt {
-                    write!(self.output, "[{}]", size).unwrap();
-                } else {
-                    self.output.push_str("[]");
-                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_writes_to(ast: &CFile, expected: &str) {
+        let mut writer = CWriter::new();
+        writer.write_c_file(ast);
+        assert_eq!(writer.finish().trim(), expected.trim());
+    }
+
+    #[test]
+    fn test_basic_function() {
+        let func = CDecl::Function {
+            name: "add".to_string(),
+            return_type: CType::Int,
+            params: vec![
+                CParam {
+                    name: "a".to_string(),
+                    ty: CType::Int,
+                },
+                CParam {
+                    name: "b".to_string(),
+                    ty: CType::Int,
+                },
+            ],
+            body: vec![CStmt::Return(Some(CExpr::Binary {
+                op: CBinaryOp::Add,
+                lhs: Box::new(CExpr::Variable("a".to_string())),
+                rhs: Box::new(CExpr::Variable("b".to_string())),
+            }))],
+        };
+
+        let file = CFile { decls: vec![func] };
+        assert_writes_to(
+            &file,
+            "int add(int a, int b) {
+    return (a) + (b);
+}",
+        );
+    }
+
+    #[test]
+    fn test_struct_definition() {
+        let struct_def = CDecl::StructDef(CStructDef {
+            name: "Point".to_string(),
+            members: vec![
+                CStructMember {
+                    name: "x".to_string(),
+                    ty: CType::Int,
+                },
+                CStructMember {
+                    name: "y".to_string(),
+                    ty: CType::Int,
+                },
+            ],
+        });
+
+        let file = CFile {
+            decls: vec![struct_def],
+        };
+        assert_writes_to(
+            &file,
+            "struct Point {
+    int x;
+    int y;
+};",
+        );
+    }
+
+    #[test]
+    fn test_typedef() {
+        let typedef = CDecl::Typedef {
+            name: "int_ptr".to_string(),
+            ty: CTypeSpecifier::Plain(CType::Pointer(Box::new(CType::Int))),
+        };
+
+        let file = CFile {
+            decls: vec![typedef],
+        };
+        assert_writes_to(&file, "typedef int* int_ptr;");
+    }
+
+    #[test]
+    fn test_const_typedef() {
+        let typedef = CDecl::Typedef {
+            name: "const_int_ptr".to_string(),
+            ty: CTypeSpecifier::Const(Box::new(CTypeSpecifier::Plain(CType::Pointer(Box::new(
+                CType::Int,
+            ))))),
+        };
+
+        let file = CFile {
+            decls: vec![typedef],
+        };
+        assert_writes_to(&file, "typedef const int* const_int_ptr;");
+    }
+
+    #[test]
+    fn test_global_var() {
+        let global = CDecl::GlobalVar {
+            name: "MAX_SIZE".to_string(),
+            ty: CType::Int,
+            init: Some(CExpr::LiteralInt(100)),
+        };
+
+        let file = CFile {
+            decls: vec![global],
+        };
+        assert_writes_to(&file, "int MAX_SIZE = 100;");
+    }
+
+    #[test]
+    fn test_function_prototype() {
+        let proto = CDecl::Prototype {
+            name: "malloc".to_string(),
+            return_type: CType::Pointer(Box::new(CType::Void)),
+            params: vec![CParam {
+                name: "size".to_string(),
+                ty: CType::Int,
+            }],
+        };
+
+        let file = CFile { decls: vec![proto] };
+        assert_writes_to(&file, "void* malloc(int size);");
+    }
+
+    #[test]
+    fn test_if_statement() {
+        let func = CDecl::Function {
+            name: "abs".to_string(),
+            return_type: CType::Int,
+            params: vec![CParam {
+                name: "x".to_string(),
+                ty: CType::Int,
+            }],
+            body: vec![CStmt::If {
+                cond: CExpr::Binary {
+                    op: CBinaryOp::Lt,
+                    lhs: Box::new(CExpr::Variable("x".to_string())),
+                    rhs: Box::new(CExpr::LiteralInt(0)),
+                },
+                then_branch: Box::new(CStmt::Return(Some(CExpr::Unary {
+                    op: CUnaryOp::Neg,
+                    expr: Box::new(CExpr::Variable("x".to_string())),
+                }))),
+                else_branch: Some(Box::new(CStmt::Return(Some(CExpr::Variable(
+                    "x".to_string(),
+                ))))),
+            }],
+        };
+
+        let file = CFile { decls: vec![func] };
+        assert_writes_to(
+            &file,
+            "int abs(int x) {
+    if ((x) < (0)) {
+        return (-x);
+    }
+    else {
+        return x;
+    }
+}",
+        );
+    }
+
+    #[test]
+    fn test_union_definition() {
+        let union_def = CDecl::UnionDef(CUnionDef {
+            name: "Data".to_string(),
+            members: vec![
+                CStructMember {
+                    name: "i".to_string(),
+                    ty: CType::Int,
+                },
+                CStructMember {
+                    name: "f".to_string(),
+                    ty: CType::Float,
+                },
+                CStructMember {
+                    name: "str".to_string(),
+                    ty: CType::Array(Box::new(CType::Char), Some(20)),
+                },
+            ],
+        });
+
+        let file = CFile {
+            decls: vec![union_def],
+        };
+        assert_writes_to(
+            &file,
+            "union Data {
+    int i;
+    float f;
+    char str[20];
+};",
+        );
     }
 }

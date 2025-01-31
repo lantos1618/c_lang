@@ -157,6 +157,32 @@ pub struct CSwitchCase {
 }
 
 #[derive(Debug, Clone)]
+pub struct CStructMember {
+    pub name: String,
+    pub ty: CType,
+}
+
+#[derive(Debug, Clone)]
+pub struct CStructDef {
+    pub name: String,
+    pub members: Vec<CStructMember>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CUnionDef {
+    pub name: String,
+    pub members: Vec<CStructMember>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CTypeSpecifier {
+    Plain(CType),
+    Const(Box<CTypeSpecifier>),
+    Volatile(Box<CTypeSpecifier>),
+    Typedef(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum CDecl {
     Function {
         name: String,
@@ -173,6 +199,12 @@ pub enum CDecl {
         name: String,
         ty: CType,
         init: Option<CExpr>,
+    },
+    StructDef(CStructDef),
+    UnionDef(CUnionDef),
+    Typedef {
+        name: String,
+        ty: CTypeSpecifier,
     },
 }
 
