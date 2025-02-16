@@ -14,6 +14,20 @@ pub struct SourceLocation {
     pub file: Option<String>,
 }
 
+impl SourceLocation {
+    pub fn new(line: usize, column: usize, file: Option<String>) -> Self {
+        Self { line, column, file }
+    }
+
+    pub fn unknown() -> Self {
+        Self {
+            line: 0,
+            column: 0,
+            file: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LoweringError {
     TypeNotFound {
@@ -29,10 +43,60 @@ pub enum LoweringError {
         message: String,
         location: Option<SourceLocation>,
     },
+    UnsupportedFeature {
+        feature: String,
+        reason: String,
+        location: Option<SourceLocation>,
+    },
+    InvalidOperator {
+        operator: String,
+        context: String,
+        location: Option<SourceLocation>,
+    },
     UnexpectedError {
         message: String,
         location: Option<SourceLocation>,
     },
+}
+
+impl LoweringError {
+    pub fn with_location(self, location: SourceLocation) -> Self {
+        match self {
+            Self::TypeNotFound { type_name, .. } => Self::TypeNotFound {
+                type_name,
+                location: Some(location),
+            },
+            Self::InvalidType {
+                type_name, reason, ..
+            } => Self::InvalidType {
+                type_name,
+                reason,
+                location: Some(location),
+            },
+            Self::NonExhaustiveMatch { message, .. } => Self::NonExhaustiveMatch {
+                message,
+                location: Some(location),
+            },
+            Self::UnsupportedFeature {
+                feature, reason, ..
+            } => Self::UnsupportedFeature {
+                feature,
+                reason,
+                location: Some(location),
+            },
+            Self::InvalidOperator {
+                operator, context, ..
+            } => Self::InvalidOperator {
+                operator,
+                context,
+                location: Some(location),
+            },
+            Self::UnexpectedError { message, .. } => Self::UnexpectedError {
+                message,
+                location: Some(location),
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for LoweringError {
@@ -44,7 +108,13 @@ impl std::fmt::Display for LoweringError {
             } => {
                 write!(f, "Type '{}' not found", type_name)?;
                 if let Some(loc) = location {
-                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        loc.file.as_deref().unwrap_or("<unknown>"),
+                        loc.line,
+                        loc.column
+                    )?;
                 }
                 Ok(())
             }
@@ -55,21 +125,73 @@ impl std::fmt::Display for LoweringError {
             } => {
                 write!(f, "Invalid type '{}': {}", type_name, reason)?;
                 if let Some(loc) = location {
-                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        loc.file.as_deref().unwrap_or("<unknown>"),
+                        loc.line,
+                        loc.column
+                    )?;
                 }
                 Ok(())
             }
             LoweringError::NonExhaustiveMatch { message, location } => {
                 write!(f, "Non-exhaustive match: {}", message)?;
                 if let Some(loc) = location {
-                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        loc.file.as_deref().unwrap_or("<unknown>"),
+                        loc.line,
+                        loc.column
+                    )?;
+                }
+                Ok(())
+            }
+            LoweringError::UnsupportedFeature {
+                feature,
+                reason,
+                location,
+            } => {
+                write!(f, "Unsupported feature '{}': {}", feature, reason)?;
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        loc.file.as_deref().unwrap_or("<unknown>"),
+                        loc.line,
+                        loc.column
+                    )?;
+                }
+                Ok(())
+            }
+            LoweringError::InvalidOperator {
+                operator,
+                context,
+                location,
+            } => {
+                write!(f, "Invalid operator '{}': {}", operator, context)?;
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        loc.file.as_deref().unwrap_or("<unknown>"),
+                        loc.line,
+                        loc.column
+                    )?;
                 }
                 Ok(())
             }
             LoweringError::UnexpectedError { message, location } => {
                 write!(f, "Unexpected error: {}", message)?;
                 if let Some(loc) = location {
-                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        loc.file.as_deref().unwrap_or("<unknown>"),
+                        loc.line,
+                        loc.column
+                    )?;
                 }
                 Ok(())
             }

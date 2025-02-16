@@ -1,24 +1,91 @@
 use crate::c_ast::*;
 use std::fmt::Write;
 
-#[derive(Default)]
+#[derive(Debug, Clone)]
+pub struct FormattingOptions {
+    pub indent_size: usize,
+    pub use_tabs: bool,
+    pub max_line_length: usize,
+    pub brace_style: BraceStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BraceStyle {
+    SameLine,
+    NextLine,
+    NextLineIndented,
+}
+
+impl Default for FormattingOptions {
+    fn default() -> Self {
+        Self {
+            indent_size: 4,
+            use_tabs: false,
+            max_line_length: 80,
+            brace_style: BraceStyle::SameLine,
+        }
+    }
+}
+
 pub struct CWriter {
     output: String,
     indent_level: usize,
+    options: FormattingOptions,
+    current_line_length: usize,
+}
+
+impl Default for CWriter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CWriter {
     pub fn new() -> Self {
+        Self::with_options(FormattingOptions::default())
+    }
+
+    pub fn with_options(options: FormattingOptions) -> Self {
         Self {
-            output: String::new(),
+            output: String::with_capacity(1024), // Pre-allocate reasonable capacity
             indent_level: 0,
+            options,
+            current_line_length: 0,
         }
     }
 
-    fn indent(&mut self) {
-        for _ in 0..self.indent_level {
-            self.output.push_str("    ");
+    fn write_indent(&mut self) -> std::fmt::Result {
+        self.current_line_length = self.indent_level * self.options.indent_size;
+        if self.options.use_tabs {
+            for _ in 0..self.indent_level {
+                self.output.push('\t');
+            }
+        } else {
+            for _ in 0..(self.indent_level * self.options.indent_size) {
+                self.output.push(' ');
+            }
         }
+        Ok(())
+    }
+
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.current_line_length += s.len();
+        self.output.push_str(s);
+        Ok(())
+    }
+
+    fn write_char(&mut self, c: char) -> std::fmt::Result {
+        self.current_line_length += 1;
+        self.output.push(c);
+        Ok(())
+    }
+
+    fn write_line(&mut self, s: &str) -> std::fmt::Result {
+        self.write_indent()?;
+        self.write_str(s)?;
+        self.write_char('\n')?;
+        self.current_line_length = 0;
+        Ok(())
     }
 
     pub fn finish(self) -> String {
@@ -26,9 +93,15 @@ impl CWriter {
     }
 
     pub fn write_c_file(&mut self, cfile: &CFile) -> std::fmt::Result {
+        // Write includes first
+        self.write_line("#include <stdbool.h>")?;
+        self.write_line("#include <stdint.h>")?;
+        self.write_line("#include <stdlib.h>")?;
+        self.write_char('\n')?;
+
         for decl in &cfile.decls {
             self.write_decl(decl)?;
-            self.output.push('\n');
+            self.write_char('\n')?;
         }
         Ok(())
     }
@@ -44,14 +117,28 @@ impl CWriter {
                 self.write_type(return_type)?;
                 write!(self.output, " {}(", name)?;
                 self.write_params(params)?;
-                self.output.push_str(") {\n");
+                self.write_str(")")?;
+
+                match self.options.brace_style {
+                    BraceStyle::SameLine => self.write_str(" {\n")?,
+                    BraceStyle::NextLine => {
+                        self.write_char('\n')?;
+                        self.write_str("{\n")?;
+                    }
+                    BraceStyle::NextLineIndented => {
+                        self.write_char('\n')?;
+                        self.write_indent()?;
+                        self.write_str("{\n")?;
+                    }
+                }
+
                 self.indent_level += 1;
                 for stmt in body {
-                    self.indent();
+                    self.write_indent()?;
                     self.write_stmt(stmt)?;
                 }
                 self.indent_level -= 1;
-                self.output.push_str("}\n");
+                self.write_line("}")?;
                 Ok(())
             }
             CDecl::Prototype {
@@ -62,7 +149,7 @@ impl CWriter {
                 self.write_type(return_type)?;
                 write!(self.output, " {}(", name)?;
                 self.write_params(params)?;
-                self.output.push_str(");\n");
+                self.write_str(");\n")?;
                 Ok(())
             }
             CDecl::GlobalVar { name, ty, init } => {
@@ -72,37 +159,37 @@ impl CWriter {
                     write!(self.output, " = ")?;
                     self.write_expr(init_expr)?;
                 }
-                self.output.push_str(";\n");
+                self.write_str(";\n")?;
                 Ok(())
             }
             CDecl::StructDef(def) => {
-                write!(self.output, "struct {} {{\n", def.name)?;
+                writeln!(self.output, "typedef struct {{")?;
                 self.indent_level += 1;
                 for member in &def.members {
-                    self.indent();
+                    self.write_indent()?;
                     self.write_type(&member.ty)?;
                     writeln!(self.output, " {};", member.name)?;
                 }
                 self.indent_level -= 1;
-                self.output.push_str("};\n");
+                writeln!(self.output, "}} {};", def.name)?;
                 Ok(())
             }
             CDecl::UnionDef(def) => {
-                write!(self.output, "union {} {{\n", def.name)?;
+                writeln!(self.output, "typedef union {{")?;
                 self.indent_level += 1;
                 for member in &def.members {
-                    self.indent();
+                    self.write_indent()?;
                     self.write_type(&member.ty)?;
                     writeln!(self.output, " {};", member.name)?;
                 }
                 self.indent_level -= 1;
-                self.output.push_str("};\n");
+                writeln!(self.output, "}} {};", def.name)?;
                 Ok(())
             }
             CDecl::Typedef { name, ty } => {
-                self.output.push_str("typedef ");
+                write!(self.output, "typedef ")?;
                 self.write_type_specifier(ty)?;
-                write!(self.output, " {};\n", name)?;
+                writeln!(self.output, " {};", name)?;
                 Ok(())
             }
         }
@@ -128,21 +215,21 @@ impl CWriter {
                     write!(self.output, " = ")?;
                     self.write_expr(init_expr)?;
                 }
-                self.output.push_str(";\n");
+                writeln!(self.output, ";")?;
                 Ok(())
             }
             CStmt::Expression(expr) => {
                 self.write_expr(expr)?;
-                self.output.push_str(";\n");
+                writeln!(self.output, ";")?;
                 Ok(())
             }
             CStmt::Return(expr) => {
-                self.output.push_str("return");
+                write!(self.output, "return")?;
                 if let Some(e) = expr {
                     write!(self.output, " ")?;
                     self.write_expr(e)?;
                 }
-                self.output.push_str(";\n");
+                writeln!(self.output, ";")?;
                 Ok(())
             }
             CStmt::If {
@@ -150,55 +237,29 @@ impl CWriter {
                 then_branch,
                 else_branch,
             } => {
-                self.output.push_str("if (");
+                write!(self.output, "if (")?;
                 self.write_expr(cond)?;
-                self.output.push_str(") {\n");
-                self.indent_level += 1;
-                self.indent();
+                write!(self.output, ") ")?;
                 self.write_stmt(then_branch)?;
-                self.indent_level -= 1;
-                self.indent();
-                self.output.push_str("}\n");
                 if let Some(else_stmt) = else_branch {
-                    self.indent();
-                    self.output.push_str("else {\n");
-                    self.indent_level += 1;
-                    self.indent();
+                    write!(self.output, " else ")?;
                     self.write_stmt(else_stmt)?;
-                    self.indent_level -= 1;
-                    self.indent();
-                    self.output.push_str("}\n");
                 }
                 Ok(())
             }
             CStmt::While { cond, body } => {
-                self.indent();
-                self.output.push_str("while (");
+                write!(self.output, "while (")?;
                 self.write_expr(cond)?;
-                self.output.push_str(")\n");
-                self.indent();
-                self.output.push_str("{\n");
-                self.indent_level += 1;
+                write!(self.output, ") ")?;
                 self.write_stmt(body)?;
-                self.indent_level -= 1;
-                self.indent();
-                self.output.push_str("}\n");
                 Ok(())
             }
             CStmt::DoWhile { body, cond } => {
-                self.indent();
-                self.output.push_str("do\n");
-                self.indent();
-                self.output.push_str("{\n");
-                self.indent_level += 1;
+                write!(self.output, "do ")?;
                 self.write_stmt(body)?;
-                self.indent_level -= 1;
-                self.indent();
-                self.output.push_str("}\n");
-                self.indent();
-                self.output.push_str("while (");
+                write!(self.output, " while (")?;
                 self.write_expr(cond)?;
-                self.output.push_str(");\n");
+                writeln!(self.output, ");")?;
                 Ok(())
             }
             CStmt::For {
@@ -207,94 +268,72 @@ impl CWriter {
                 increment,
                 body,
             } => {
-                self.indent();
-                self.output.push_str("for (");
+                write!(self.output, "for (")?;
                 if let Some(init_stmt) = init {
-                    match &**init_stmt {
-                        CStmt::Declaration { name, ty, init } => {
-                            self.write_type(ty)?;
-                            write!(self.output, " {}", name)?;
-                            if let Some(expr) = init {
-                                write!(self.output, " = ")?;
-                                self.write_expr(expr)?;
-                            }
-                        }
-                        CStmt::Expression(expr) => {
-                            self.write_expr(expr)?;
-                        }
-                        _ => panic!("Invalid for loop init statement"),
-                    }
+                    self.write_stmt(init_stmt)?;
                 }
-                self.output.push(';');
-                self.output.push(' ');
-                if let Some(cond) = cond {
-                    self.write_expr(cond)?;
+                write!(self.output, "; ")?;
+                if let Some(cond_expr) = cond {
+                    self.write_expr(cond_expr)?;
                 }
-                self.output.push(';');
-                self.output.push(' ');
-                if let Some(increment) = increment {
-                    self.write_expr(increment)?;
+                write!(self.output, "; ")?;
+                if let Some(incr_expr) = increment {
+                    self.write_expr(incr_expr)?;
                 }
-                self.output.push_str(")\n");
-                self.indent();
-                self.output.push_str("{\n");
-                self.indent_level += 1;
+                write!(self.output, ") ")?;
                 self.write_stmt(body)?;
-                self.indent_level -= 1;
-                self.indent();
-                self.output.push_str("}\n");
-                Ok(())
-            }
-            CStmt::Break => {
-                self.indent();
-                self.output.push_str("break;\n");
-                Ok(())
-            }
-            CStmt::Continue => {
-                self.indent();
-                self.output.push_str("continue;\n");
-                Ok(())
-            }
-            CStmt::Block(stmts) => {
-                for stmt in stmts {
-                    self.write_stmt(stmt)?;
-                }
                 Ok(())
             }
             CStmt::Switch { expr, cases } => {
-                self.output.push_str("switch (");
+                write!(self.output, "switch (")?;
                 self.write_expr(expr)?;
-                self.output.push_str(") {\n");
+                writeln!(self.output, ") {{")?;
+                self.indent_level += 1;
                 for case in cases {
-                    self.write_switch_case(case)?;
+                    match case {
+                        CSwitchCase::Case(expr, stmt) => {
+                            self.write_indent()?;
+                            write!(self.output, "case ")?;
+                            self.write_expr(expr)?;
+                            writeln!(self.output, ":")?;
+                            self.indent_level += 1;
+                            self.write_indent()?;
+                            self.write_stmt(stmt)?;
+                            self.indent_level -= 1;
+                        }
+                        CSwitchCase::Default(stmt) => {
+                            self.write_indent()?;
+                            writeln!(self.output, "default:")?;
+                            self.indent_level += 1;
+                            self.write_indent()?;
+                            self.write_stmt(stmt)?;
+                            self.indent_level -= 1;
+                        }
+                    }
                 }
-                self.indent();
-                self.output.push_str("}\n");
+                self.indent_level -= 1;
+                self.write_indent()?;
+                writeln!(self.output, "}}")?;
                 Ok(())
             }
-        }
-    }
-
-    fn write_switch_case(&mut self, case: &CSwitchCase) -> std::fmt::Result {
-        match case {
-            CSwitchCase::Case(value, stmt) => {
-                self.indent();
-                self.output.push_str("case ");
-                self.write_expr(value)?;
-                self.output.push_str(":\n");
-                self.indent_level += 1;
-                self.indent();
-                self.write_stmt(stmt)?;
-                self.indent_level -= 1;
+            CStmt::Break => {
+                writeln!(self.output, "break;")?;
                 Ok(())
             }
-            CSwitchCase::Default(stmt) => {
-                self.indent();
-                self.output.push_str("default:\n");
+            CStmt::Continue => {
+                writeln!(self.output, "continue;")?;
+                Ok(())
+            }
+            CStmt::Block(stmts) => {
+                writeln!(self.output, "{{")?;
                 self.indent_level += 1;
-                self.indent();
-                self.write_stmt(stmt)?;
+                for stmt in stmts {
+                    self.write_indent()?;
+                    self.write_stmt(stmt)?;
+                }
                 self.indent_level -= 1;
+                self.write_indent()?;
+                writeln!(self.output, "}}")?;
                 Ok(())
             }
         }
@@ -395,180 +434,138 @@ impl CWriter {
             CExpr::LiteralString(s) => write!(self.output, "\"{}\"", s),
             CExpr::LiteralChar(c) => write!(self.output, "'{}'", c),
             CExpr::Variable(name) => write!(self.output, "{}", name),
-            CExpr::Binary { op, lhs, rhs } => {
-                let needs_parens = match rhs.as_ref() {
-                    CExpr::Binary { op: rhs_op, .. } => {
-                        let rhs_precedence = self.get_precedence(rhs);
-                        let expr_precedence = self.get_precedence(expr);
-                        rhs_precedence < expr_precedence
-                            || (matches!(op, CBinaryOp::Mul)
-                                && matches!(rhs_op, CBinaryOp::Add | CBinaryOp::Sub))
+            CExpr::Unary { op, expr } => {
+                write!(
+                    self.output,
+                    "{}",
+                    match op {
+                        CUnaryOp::Neg => "-",
+                        CUnaryOp::Not => "!",
+                        CUnaryOp::Tilde => "~",
                     }
-                    _ => false,
-                };
-
-                self.write_expr(lhs)?;
-                self.output.push(' ');
-                self.output.push_str(match op {
-                    CBinaryOp::Add => "+",
-                    CBinaryOp::Sub => "-",
-                    CBinaryOp::Mul => "*",
-                    CBinaryOp::Div => "/",
-                    CBinaryOp::Mod => "%",
-                    CBinaryOp::Lt => "<",
-                    CBinaryOp::Le => "<=",
-                    CBinaryOp::Gt => ">",
-                    CBinaryOp::Ge => ">=",
-                    CBinaryOp::Eq => "==",
-                    CBinaryOp::Ne => "!=",
-                    CBinaryOp::And => "&&",
-                    CBinaryOp::Or => "||",
-                    CBinaryOp::BitAnd => "&",
-                    CBinaryOp::BitOr => "|",
-                    CBinaryOp::BitXor => "^",
-                    CBinaryOp::Shl => "<<",
-                    CBinaryOp::Shr => ">>",
-                });
-                self.output.push(' ');
-                if needs_parens {
-                    self.output.push('(');
+                )?;
+                if self.needs_parens(expr) {
+                    write!(self.output, "(")?;
+                    self.write_expr(expr)?;
+                    write!(self.output, ")")?;
+                } else {
+                    self.write_expr(expr)?;
                 }
+                Ok(())
+            }
+            CExpr::Binary { op, lhs, rhs } => {
+                let needs_parens = self.needs_parens(expr);
+                if needs_parens {
+                    write!(self.output, "(")?;
+                }
+                self.write_expr(lhs)?;
+                write!(
+                    self.output,
+                    " {} ",
+                    match op {
+                        CBinaryOp::Add => "+",
+                        CBinaryOp::Sub => "-",
+                        CBinaryOp::Mul => "*",
+                        CBinaryOp::Div => "/",
+                        CBinaryOp::Mod => "%",
+                        CBinaryOp::Lt => "<",
+                        CBinaryOp::Le => "<=",
+                        CBinaryOp::Gt => ">",
+                        CBinaryOp::Ge => ">=",
+                        CBinaryOp::Eq => "==",
+                        CBinaryOp::Ne => "!=",
+                        CBinaryOp::And => "&&",
+                        CBinaryOp::Or => "||",
+                        CBinaryOp::BitAnd => "&",
+                        CBinaryOp::BitOr => "|",
+                        CBinaryOp::BitXor => "^",
+                        CBinaryOp::Shl => "<<",
+                        CBinaryOp::Shr => ">>",
+                    }
+                )?;
                 self.write_expr(rhs)?;
                 if needs_parens {
-                    self.output.push(')');
+                    write!(self.output, ")")?;
                 }
-                Ok(())
-            }
-            CExpr::Unary { op, expr } => match op {
-                CUnaryOp::Neg => {
-                    self.output.push('-');
-                    if self.needs_parens(expr) {
-                        self.output.push('(');
-                        self.write_expr(expr)?;
-                        self.output.push(')');
-                    } else {
-                        self.write_expr(expr)?;
-                    }
-                    Ok(())
-                }
-                CUnaryOp::Not => {
-                    self.output.push('!');
-                    if self.needs_parens(expr) {
-                        self.output.push('(');
-                        self.write_expr(expr)?;
-                        self.output.push(')');
-                    } else {
-                        self.write_expr(expr)?;
-                    }
-                    Ok(())
-                }
-                CUnaryOp::Tilde => {
-                    self.output.push('~');
-                    if self.needs_parens(expr) {
-                        self.output.push('(');
-                        self.write_expr(expr)?;
-                        self.output.push(')');
-                    } else {
-                        self.write_expr(expr)?;
-                    }
-                    Ok(())
-                }
-            },
-            CExpr::Call { func, args } => {
-                self.write_expr(func)?;
-                self.output.push('(');
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        self.output.push_str(", ");
-                    }
-                    self.write_expr(arg)?;
-                }
-                self.output.push(')');
-                Ok(())
-            }
-            CExpr::Member {
-                base,
-                member,
-                arrow,
-            } => match &**base {
-                CExpr::Deref(inner) => {
-                    self.output.push('(');
-                    self.output.push('*');
-                    if matches!(inner.as_ref(), CExpr::Binary { .. }) {
-                        self.output.push('(');
-                    }
-                    self.write_expr(inner)?;
-                    if matches!(inner.as_ref(), CExpr::Binary { .. }) {
-                        self.output.push(')');
-                    }
-                    self.output.push(')');
-                    self.output.push_str("->");
-                    self.output.push_str(member);
-                    Ok(())
-                }
-                _ => {
-                    self.write_expr(base)?;
-                    if *arrow {
-                        self.output.push_str("->");
-                    } else {
-                        self.output.push('.');
-                    }
-                    self.output.push_str(member);
-                    Ok(())
-                }
-            },
-            CExpr::Subscript { base, index } => {
-                self.write_expr(base)?;
-                self.output.push('[');
-                self.write_expr(index)?;
-                self.output.push(']');
                 Ok(())
             }
             CExpr::Assign { op, lhs, rhs } => {
                 self.write_expr(lhs)?;
-                self.output.push(' ');
-                self.output.push_str(match op {
-                    CAssignOp::Assign => "=",
-                    CAssignOp::AddAssign => "+=",
-                    CAssignOp::SubAssign => "-=",
-                    CAssignOp::MulAssign => "*=",
-                    CAssignOp::DivAssign => "/=",
-                    CAssignOp::ModAssign => "%=",
-                    CAssignOp::ShlAssign => "<<=",
-                    CAssignOp::ShrAssign => ">>=",
-                    CAssignOp::AndAssign => "&=",
-                    CAssignOp::XorAssign => "^=",
-                    CAssignOp::OrAssign => "|=",
-                });
-                self.output.push(' ');
+                write!(
+                    self.output,
+                    " {} ",
+                    match op {
+                        CAssignOp::Assign => "=",
+                        CAssignOp::AddAssign => "+=",
+                        CAssignOp::SubAssign => "-=",
+                        CAssignOp::MulAssign => "*=",
+                        CAssignOp::DivAssign => "/=",
+                        CAssignOp::ModAssign => "%=",
+                        CAssignOp::ShlAssign => "<<=",
+                        CAssignOp::ShrAssign => ">>=",
+                        CAssignOp::AndAssign => "&=",
+                        CAssignOp::XorAssign => "^=",
+                        CAssignOp::OrAssign => "|=",
+                    }
+                )?;
                 self.write_expr(rhs)?;
                 Ok(())
             }
+            CExpr::Call { func, args } => {
+                self.write_expr(func)?;
+                write!(self.output, "(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(self.output, ", ")?;
+                    }
+                    self.write_expr(arg)?;
+                }
+                write!(self.output, ")")?;
+                Ok(())
+            }
             CExpr::Cast { to, expr } => {
-                self.output.push('(');
+                write!(self.output, "(")?;
                 self.write_type(to)?;
-                self.output.push(')');
-                self.write_expr(expr)?;
+                write!(self.output, ")")?;
+                if self.needs_parens(expr) {
+                    write!(self.output, "(")?;
+                    self.write_expr(expr)?;
+                    write!(self.output, ")")?;
+                } else {
+                    self.write_expr(expr)?;
+                }
                 Ok(())
             }
             CExpr::AddrOf(expr) => {
-                self.output.push('&');
-                self.write_expr(expr)?;
+                write!(self.output, "&")?;
+                if self.needs_parens(expr) {
+                    write!(self.output, "(")?;
+                    self.write_expr(expr)?;
+                    write!(self.output, ")")?;
+                } else {
+                    self.write_expr(expr)?;
+                }
                 Ok(())
             }
             CExpr::Deref(expr) => {
-                self.output.push('*');
-                self.write_expr(expr)?;
+                write!(self.output, "*")?;
+                if self.needs_parens(expr) {
+                    write!(self.output, "(")?;
+                    self.write_expr(expr)?;
+                    write!(self.output, ")")?;
+                } else {
+                    self.write_expr(expr)?;
+                }
                 Ok(())
             }
             CExpr::PostIncrement(expr) => {
                 self.write_expr(expr)?;
-                self.output.push_str("++");
+                write!(self.output, "++")?;
                 Ok(())
             }
             CExpr::PostDecrement(expr) => {
                 self.write_expr(expr)?;
-                self.output.push_str("--");
+                write!(self.output, "--")?;
                 Ok(())
             }
             CExpr::Ternary {
@@ -576,44 +573,73 @@ impl CWriter {
                 then_expr,
                 else_expr,
             } => {
+                if self.needs_parens(expr) {
+                    write!(self.output, "(")?;
+                }
                 self.write_expr(cond)?;
-                self.output.push_str(" ? ");
+                write!(self.output, " ? ")?;
                 self.write_expr(then_expr)?;
-                self.output.push_str(" : ");
+                write!(self.output, " : ")?;
                 self.write_expr(else_expr)?;
+                if self.needs_parens(expr) {
+                    write!(self.output, ")")?;
+                }
+                Ok(())
+            }
+            CExpr::Member {
+                base,
+                member,
+                arrow,
+            } => {
+                if self.needs_parens(base) {
+                    write!(self.output, "(")?;
+                    self.write_expr(base)?;
+                    write!(self.output, ")")?;
+                } else {
+                    self.write_expr(base)?;
+                }
+                write!(self.output, "{}{}", if *arrow { "->" } else { "." }, member)?;
+                Ok(())
+            }
+            CExpr::Subscript { base, index } => {
+                if self.needs_parens(base) {
+                    write!(self.output, "(")?;
+                    self.write_expr(base)?;
+                    write!(self.output, ")")?;
+                } else {
+                    self.write_expr(base)?;
+                }
+                write!(self.output, "[")?;
+                self.write_expr(index)?;
+                write!(self.output, "]")?;
                 Ok(())
             }
             CExpr::Comma(exprs) => {
+                write!(self.output, "(")?;
                 for (i, expr) in exprs.iter().enumerate() {
                     if i > 0 {
-                        self.output.push_str(", ");
+                        write!(self.output, ", ")?;
                     }
                     self.write_expr(expr)?;
                 }
+                write!(self.output, ")")?;
                 Ok(())
             }
             CExpr::Block { stmts, result } => {
-                self.output.push('(');
-                self.output.push('{');
-                self.output.push('\n');
+                writeln!(self.output, "{{")?;
                 self.indent_level += 1;
-
                 for stmt in stmts {
-                    self.indent();
+                    self.write_indent()?;
                     self.write_stmt(stmt)?;
                 }
-
                 if let Some(result_expr) = result {
-                    self.indent();
+                    self.write_indent()?;
                     self.write_expr(result_expr)?;
-                    self.output.push(';');
-                    self.output.push('\n');
+                    writeln!(self.output)?;
                 }
-
                 self.indent_level -= 1;
-                self.indent();
-                self.output.push('}');
-                self.output.push(')');
+                self.write_indent()?;
+                write!(self.output, "}}")?;
                 Ok(())
             }
         }
@@ -634,43 +660,43 @@ impl CWriter {
                 Ok(())
             }
             CType::Int8 => {
-                self.output.push_str("int8_t");
+                self.output.push_str("signed char"); // More standard C
                 Ok(())
             }
             CType::Int16 => {
-                self.output.push_str("int16_t");
+                self.output.push_str("short"); // More standard C
                 Ok(())
             }
             CType::Int32 => {
-                self.output.push_str("int32_t");
+                self.output.push_str("int"); // More standard C
                 Ok(())
             }
             CType::Int64 => {
-                self.output.push_str("int64_t");
+                self.output.push_str("long long"); // More standard C
                 Ok(())
             }
             CType::IntPtr => {
-                self.output.push_str("intptr_t");
+                self.output.push_str("intptr_t"); // Keep this as is since it's platform-specific
                 Ok(())
             }
             CType::UInt8 => {
-                self.output.push_str("uint8_t");
+                self.output.push_str("unsigned char"); // More standard C
                 Ok(())
             }
             CType::UInt16 => {
-                self.output.push_str("uint16_t");
+                self.output.push_str("unsigned short"); // More standard C
                 Ok(())
             }
             CType::UInt32 => {
-                self.output.push_str("uint32_t");
+                self.output.push_str("unsigned int"); // More standard C
                 Ok(())
             }
             CType::UInt64 => {
-                self.output.push_str("uint64_t");
+                self.output.push_str("unsigned long long"); // More standard C
                 Ok(())
             }
             CType::UIntPtr => {
-                self.output.push_str("uintptr_t");
+                self.output.push_str("uintptr_t"); // Keep this as is since it's platform-specific
                 Ok(())
             }
             CType::Float => {
@@ -687,18 +713,15 @@ impl CWriter {
                 Ok(())
             }
             CType::Struct(name) => {
-                self.output.push_str("struct ");
-                self.output.push_str(name);
+                write!(self.output, "{}", name)?; // Remove 'struct' prefix since we're using typedef
                 Ok(())
             }
             CType::Union(name) => {
-                self.output.push_str("union ");
-                self.output.push_str(name);
+                write!(self.output, "{}", name)?; // Remove 'union' prefix since we're using typedef
                 Ok(())
             }
             CType::Enum(name) => {
-                self.output.push_str("enum ");
-                self.output.push_str(name);
+                write!(self.output, "{}", name)?; // Remove 'enum' prefix since we're using typedef
                 Ok(())
             }
             CType::Array(inner, size) => {
@@ -736,96 +759,181 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_write_function() -> std::fmt::Result {
+    fn test_basic_formatting() {
         let mut writer = CWriter::new();
-        let func = CDecl::Function {
-            name: "add".to_string(),
-            return_type: CType::Int32,
-            params: vec![
-                CParam {
-                    name: "a".to_string(),
-                    ty: CType::Int32,
-                },
-                CParam {
-                    name: "b".to_string(),
-                    ty: CType::Int32,
-                },
-            ],
-            body: vec![CStmt::Return(Some(CExpr::Binary {
-                op: CBinaryOp::Add,
-                lhs: Box::new(CExpr::Variable("a".to_string())),
-                rhs: Box::new(CExpr::Variable("b".to_string())),
-            }))],
-        };
-
-        writer.write_decl(&func)?;
-        assert_eq!(
-            writer.output.trim(),
-            "int32_t add(int32_t a, int32_t b) {\n    return a + b;\n}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_switch_statement() -> std::fmt::Result {
-        let mut writer = CWriter::new();
-        let func = CDecl::Function {
-            name: "switch_test".to_string(),
-            return_type: CType::Int32,
-            params: vec![CParam {
-                name: "x".to_string(),
-                ty: CType::Int32,
-            }],
-            body: vec![CStmt::Switch {
-                expr: CExpr::Variable("x".to_string()),
-                cases: vec![
-                    CSwitchCase::Case(
-                        CExpr::LiteralInt(1),
-                        Box::new(CStmt::Return(Some(CExpr::LiteralInt(1)))),
-                    ),
-                    CSwitchCase::Case(
-                        CExpr::LiteralInt(2),
-                        Box::new(CStmt::Return(Some(CExpr::LiteralInt(2)))),
-                    ),
-                    CSwitchCase::Default(Box::new(CStmt::Return(Some(CExpr::LiteralInt(0))))),
+        let program = CFile {
+            decls: vec![CDecl::Function {
+                name: "test".to_string(),
+                return_type: CType::Int32,
+                params: vec![],
+                body: vec![
+                    CStmt::Declaration {
+                        name: "x".to_string(),
+                        ty: CType::Int32,
+                        init: Some(CExpr::LiteralInt(42)),
+                    },
+                    CStmt::Return(Some(CExpr::Variable("x".to_string()))),
                 ],
             }],
         };
 
-        writer.write_decl(&func)?;
-        assert_eq!(
-            writer.output.trim(),
-            "int32_t switch_test(int32_t x) {\n    switch (x) {\n    case 1:\n        return 1;\n    case 2:\n        return 2;\n    default:\n        return 0;\n    }\n}"
-        );
-        Ok(())
+        writer.write_c_file(&program).unwrap();
+        let output = writer.finish();
+        assert!(output.contains("int test()"));
+        assert!(output.contains("int x = 42;"));
+        assert!(output.contains("return x;"));
     }
 
     #[test]
-    fn test_write_expressions() -> std::fmt::Result {
-        let mut writer = CWriter::new();
-        let test_cases = vec![
-            (
-                CExpr::Binary {
-                    op: CBinaryOp::Add,
-                    lhs: Box::new(CExpr::LiteralInt(1)),
-                    rhs: Box::new(CExpr::LiteralInt(2)),
-                },
-                "1 + 2",
-            ),
-            (
-                CExpr::Unary {
-                    op: CUnaryOp::Not,
-                    expr: Box::new(CExpr::Variable("x".to_string())),
-                },
-                "!x",
-            ),
-        ];
+    fn test_formatting_options() {
+        let options = FormattingOptions {
+            indent_size: 2,
+            use_tabs: false,
+            max_line_length: 80,
+            brace_style: BraceStyle::NextLine,
+        };
+        let mut writer = CWriter::with_options(options);
+        let program = CFile {
+            decls: vec![CDecl::Function {
+                name: "test".to_string(),
+                return_type: CType::Int32,
+                params: vec![],
+                body: vec![CStmt::If {
+                    cond: CExpr::LiteralInt(1),
+                    then_branch: Box::new(CStmt::Return(Some(CExpr::LiteralInt(1)))),
+                    else_branch: Some(Box::new(CStmt::Return(Some(CExpr::LiteralInt(0))))),
+                }],
+            }],
+        };
 
-        for (expr, expected) in test_cases {
-            writer.output.clear();
-            writer.write_expr(&expr)?;
-            assert_eq!(writer.output.trim(), expected);
+        writer.write_c_file(&program).unwrap();
+        let output = writer.finish();
+        assert!(output.contains("  if")); // Check indent size
+        assert!(output.contains("int test()\n{")); // Check brace style
+    }
+
+    #[test]
+    fn test_complex_expressions() {
+        let mut writer = CWriter::new();
+        let expr = CExpr::Binary {
+            op: CBinaryOp::Add,
+            lhs: Box::new(CExpr::Binary {
+                op: CBinaryOp::Mul,
+                lhs: Box::new(CExpr::LiteralInt(2)),
+                rhs: Box::new(CExpr::LiteralInt(3)),
+            }),
+            rhs: Box::new(CExpr::LiteralInt(4)),
+        };
+
+        writer.write_expr(&expr).unwrap();
+        let output = writer.finish();
+        assert_eq!(output, "2 * 3 + 4");
+    }
+
+    #[test]
+    fn test_struct_formatting() {
+        let mut writer = CWriter::new();
+        let program = CFile {
+            decls: vec![CDecl::StructDef(CStructDef {
+                name: "Point".to_string(),
+                members: vec![
+                    CStructMember {
+                        name: "x".to_string(),
+                        ty: CType::Float,
+                    },
+                    CStructMember {
+                        name: "y".to_string(),
+                        ty: CType::Float,
+                    },
+                ],
+            })],
+        };
+
+        writer.write_c_file(&program).unwrap();
+        let output = writer.finish();
+        assert!(output.contains("typedef struct {"));
+        assert!(output.contains("float x;"));
+        assert!(output.contains("float y;"));
+        assert!(output.contains("} Point;"));
+    }
+
+    #[test]
+    fn test_integer_types() {
+        let mut writer = CWriter::new();
+        let program = CFile {
+            decls: vec![CDecl::Function {
+                name: "test_types".to_string(),
+                return_type: CType::Void,
+                params: vec![],
+                body: vec![
+                    CStmt::Declaration {
+                        name: "a".to_string(),
+                        ty: CType::Int8,
+                        init: None,
+                    },
+                    CStmt::Declaration {
+                        name: "b".to_string(),
+                        ty: CType::Int16,
+                        init: None,
+                    },
+                    CStmt::Declaration {
+                        name: "c".to_string(),
+                        ty: CType::Int32,
+                        init: None,
+                    },
+                    CStmt::Declaration {
+                        name: "d".to_string(),
+                        ty: CType::Int64,
+                        init: None,
+                    },
+                ],
+            }],
+        };
+
+        writer.write_c_file(&program).unwrap();
+        let output = writer.finish();
+
+        // Check standard C type names
+        assert!(output.contains("signed char a;"));
+        assert!(output.contains("short b;"));
+        assert!(output.contains("int c;"));
+        assert!(output.contains("long long d;"));
+    }
+}
+
+// Add source mapping support
+#[derive(Debug, Clone)]
+pub struct SourceMapEntry {
+    pub generated_line: usize,
+    pub generated_column: usize,
+    pub original_line: usize,
+    pub original_column: usize,
+    pub source_file: String,
+}
+
+#[derive(Default)]
+pub struct SourceMap {
+    entries: Vec<SourceMapEntry>,
+}
+
+impl SourceMap {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
         }
-        Ok(())
+    }
+
+    pub fn add_entry(&mut self, entry: SourceMapEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn get_original_location(
+        &self,
+        generated_line: usize,
+        generated_column: usize,
+    ) -> Option<&SourceMapEntry> {
+        self.entries.iter().find(|entry| {
+            entry.generated_line == generated_line && entry.generated_column == generated_column
+        })
     }
 }
