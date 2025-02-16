@@ -10,6 +10,8 @@ pub struct AstLowering {
 pub enum LoweringError {
     TypeNotFound(String),
     InvalidType(String),
+    NonExhaustiveMatch(String),
+    UnexpectedError(String),
 }
 
 impl AstLowering {
@@ -122,12 +124,23 @@ impl AstLowering {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(if let Some(body) = body {
+        let lowered_body = match body {
+            Some(stmts) => {
+                let mut c_stmts = Vec::new();
+                for stmt in stmts {
+                    c_stmts.push(self.lower_stmt(stmt)?);
+                }
+                c_stmts
+            }
+            None => Vec::new(),
+        };
+
+        Ok(if body.is_some() {
             CDecl::Function {
                 name: name.to_string(),
                 return_type: self.lower_type(return_type)?,
                 params: c_params,
-                body: body.iter().map(|s| self.lower_stmt(s)).collect(),
+                body: lowered_body,
             }
         } else {
             CDecl::Prototype {
@@ -139,18 +152,20 @@ impl AstLowering {
     }
 
     fn lower_struct(&self, struct_def: &StructDef) -> Result<CDecl, LoweringError> {
+        let members = struct_def
+            .fields
+            .iter()
+            .map(|f| -> Result<CStructMember, LoweringError> {
+                Ok(CStructMember {
+                    name: f.name.clone(),
+                    ty: self.lower_type(&f.ty)?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(CDecl::StructDef(CStructDef {
             name: struct_def.name.clone(),
-            members: struct_def
-                .fields
-                .iter()
-                .map(|f| -> Result<CStructMember, LoweringError> {
-                    Ok(CStructMember {
-                        name: f.name.clone(),
-                        ty: self.lower_type(&f.ty)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            members,
         }))
     }
 
@@ -217,70 +232,110 @@ impl AstLowering {
         })
     }
 
-    fn lower_stmt(&self, stmt: &Stmt) -> CStmt {
+    fn lower_stmt(&self, stmt: &Stmt) -> Result<CStmt, LoweringError> {
         match stmt {
-            Stmt::Let { name, ty, value } => CStmt::Declaration {
-                name: name.clone(),
-                ty: ty
-                    .as_ref()
-                    .map(|t| self.lower_type(t).unwrap_or(CType::Int))
-                    .unwrap_or(CType::Int),
-                init: Some(self.lower_expr(value)),
-            },
-            Stmt::Expr(expr) => CStmt::Expression(self.lower_expr(expr)),
-            Stmt::Return(expr) => CStmt::Return(expr.as_ref().map(|e| self.lower_expr(e))),
+            Stmt::Let { name, ty, value } => {
+                let inferred_type = match ty {
+                    Some(t) => self.lower_type(t)?,
+                    None => {
+                        return Err(LoweringError::InvalidType(
+                            "Type inference not supported".to_string(),
+                        ))
+                    }
+                };
+
+                let init_expr = self.lower_expr(value)?;
+                Ok(CStmt::Declaration {
+                    name: name.clone(),
+                    ty: inferred_type,
+                    init: Some(init_expr),
+                })
+            }
+            Stmt::Expr(expr) => {
+                let lowered_expr = self.lower_expr(expr)?;
+                Ok(CStmt::Expression(lowered_expr))
+            }
+            Stmt::Return(expr) => {
+                let lowered_expr = match expr {
+                    Some(e) => Some(self.lower_expr(e)?),
+                    None => None,
+                };
+                Ok(CStmt::Return(lowered_expr))
+            }
             Stmt::Loop { body } => {
-                let c_body = body.iter().map(|s| self.lower_stmt(s)).collect();
-                CStmt::While {
-                    cond: CExpr::LiteralInt(1), // while(1)
-                    body: Box::new(CStmt::Block(c_body)),
+                let mut c_body = Vec::new();
+                for stmt in body {
+                    c_body.push(self.lower_stmt(stmt)?);
                 }
+
+                Ok(CStmt::While {
+                    cond: CExpr::LiteralInt(1),
+                    body: Box::new(CStmt::Block(c_body)),
+                })
             }
             Stmt::While { cond, body } => {
-                let c_body = body.iter().map(|s| self.lower_stmt(s)).collect();
-                CStmt::While {
-                    cond: self.lower_expr(cond),
-                    body: Box::new(CStmt::Block(c_body)),
+                let mut c_body = Vec::new();
+                for stmt in body {
+                    c_body.push(self.lower_stmt(stmt)?);
                 }
+
+                let lowered_cond = self.lower_expr(cond)?;
+                Ok(CStmt::While {
+                    cond: lowered_cond,
+                    body: Box::new(CStmt::Block(c_body)),
+                })
             }
-            Stmt::Break => CStmt::Break,
-            Stmt::Continue => CStmt::Continue,
-            Stmt::Block(stmts) => CStmt::Block(stmts.iter().map(|s| self.lower_stmt(s)).collect()),
+            Stmt::Break => Ok(CStmt::Break),
+            Stmt::Continue => Ok(CStmt::Continue),
+            Stmt::Block(stmts) => {
+                let mut c_stmts = Vec::new();
+                for stmt in stmts {
+                    c_stmts.push(self.lower_stmt(stmt)?);
+                }
+                Ok(CStmt::Block(c_stmts))
+            }
         }
     }
 
-    fn lower_expr(&self, expr: &Expr) -> CExpr {
+    fn lower_expr(&self, expr: &Expr) -> Result<CExpr, LoweringError> {
         match expr {
-            Expr::Literal(lit) => self.lower_literal(lit),
-            Expr::Variable(name) => CExpr::Variable(name.clone()),
+            Expr::Literal(lit) => Ok(self.lower_literal(lit)),
+            Expr::Variable(name) => Ok(CExpr::Variable(name.clone())),
             Expr::Binary { op, left, right } => {
                 let c_op = self.lower_binary_op(op);
-                CExpr::Binary {
+                Ok(CExpr::Binary {
                     op: c_op,
-                    lhs: Box::new(self.lower_expr(left)),
-                    rhs: Box::new(self.lower_expr(right)),
-                }
+                    lhs: Box::new(self.lower_expr(left)?),
+                    rhs: Box::new(self.lower_expr(right)?),
+                })
             }
             Expr::Unary { op, expr } => {
                 let c_op = self.lower_unary_op(op);
-                CExpr::Unary {
+                Ok(CExpr::Unary {
                     op: c_op,
-                    expr: Box::new(self.lower_expr(expr)),
-                }
+                    expr: Box::new(self.lower_expr(expr)?),
+                })
             }
-            Expr::Call { func, args } => CExpr::Call {
-                func: Box::new(self.lower_expr(func)),
-                args: args.iter().map(|a| self.lower_expr(a)).collect(),
-            },
-            Expr::FieldAccess { expr, field } => CExpr::Member {
-                base: Box::new(self.lower_expr(expr)),
+            Expr::Call { func, args } => {
+                let lowered_args = args
+                    .iter()
+                    .map(|a| self.lower_expr(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(CExpr::Call {
+                    func: Box::new(self.lower_expr(func)?),
+                    args: lowered_args,
+                })
+            }
+            Expr::FieldAccess { expr, field } => Ok(CExpr::Member {
+                base: Box::new(self.lower_expr(expr)?),
                 member: field.clone(),
-                arrow: matches!(**expr, Expr::Variable(_)), // Fixed: Properly dereference the boxed expression
-            },
-            Expr::ArrayAccess { array, index } => CExpr::Subscript {
-                base: Box::new(self.lower_expr(array)),
-                index: Box::new(self.lower_expr(index)),
-            },
+                arrow: matches!(**expr, Expr::Variable(_)),
+            }),
+            Expr::ArrayAccess { array, index } => Ok(CExpr::Subscript {
+                base: Box::new(self.lower_expr(array)?),
+                index: Box::new(self.lower_expr(index)?),
+            }),
             Expr::Match { expr, arms } => self.lower_match(expr, arms),
         }
     }
@@ -320,7 +375,7 @@ impl AstLowering {
         }
     }
 
-    fn lower_match(&self, expr: &Expr, arms: &[MatchArm]) -> CExpr {
+    fn lower_match(&self, expr: &Expr, arms: &[MatchArm]) -> Result<CExpr, LoweringError> {
         // Check if we can use a switch statement
         let can_use_switch = match expr {
             Expr::Variable(_) => true,
@@ -329,15 +384,12 @@ impl AstLowering {
         };
 
         if !can_use_switch {
-            // Fallback to ternary for complex expressions
             return self.lower_match_to_ternary(expr, arms);
         }
 
-        // Generate a temporary variable to hold the switch value if needed
         let switch_var = format!("__switch_{}", self.get_unique_id());
         let switch_expr = CExpr::Variable(switch_var.clone());
 
-        // Create switch cases
         let mut cases = Vec::new();
         let mut has_default = false;
 
@@ -345,7 +397,7 @@ impl AstLowering {
             match &arm.pattern {
                 Pattern::Literal(lit) => {
                     let case_expr = self.lower_literal(lit);
-                    let body = self.lower_match_arm_body(&arm.body);
+                    let body = self.lower_match_arm_body(&arm.body)?;
                     cases.push(CSwitchCase::Case(
                         case_expr,
                         Box::new(CStmt::Block(vec![CStmt::Expression(body), CStmt::Break])),
@@ -353,7 +405,7 @@ impl AstLowering {
                 }
                 Pattern::EnumVariant { name, .. } => {
                     let case_expr = CExpr::Variable(format!("{}_Tag", name));
-                    let body = self.lower_match_arm_body(&arm.body);
+                    let body = self.lower_match_arm_body(&arm.body)?;
                     cases.push(CSwitchCase::Case(
                         case_expr,
                         Box::new(CStmt::Block(vec![CStmt::Expression(body), CStmt::Break])),
@@ -361,33 +413,30 @@ impl AstLowering {
                 }
                 Pattern::Wildcard => {
                     has_default = true;
-                    let body = self.lower_match_arm_body(&arm.body);
+                    let body = self.lower_match_arm_body(&arm.body)?;
                     cases.push(CSwitchCase::Default(Box::new(CStmt::Block(vec![
                         CStmt::Expression(body),
                         CStmt::Break,
                     ]))));
                 }
                 _ => {
-                    // For complex patterns, fall back to if-else
                     return self.lower_match_to_ternary(expr, arms);
                 }
             }
         }
 
-        // Add a default case if none exists
         if !has_default {
-            cases.push(CSwitchCase::Default(Box::new(CStmt::Block(vec![
-                CStmt::Expression(CExpr::LiteralInt(0)),
-                CStmt::Break,
-            ]))));
+            return Err(LoweringError::NonExhaustiveMatch(
+                "Match expression is not exhaustive".to_string(),
+            ));
         }
 
-        CExpr::Block {
+        Ok(CExpr::Block {
             stmts: vec![
                 CStmt::Declaration {
                     name: switch_var.clone(),
                     ty: CType::Int, // TODO: Infer proper type
-                    init: Some(self.lower_expr(expr)),
+                    init: Some(self.lower_expr(expr)?),
                 },
                 CStmt::Switch {
                     expr: switch_expr,
@@ -395,15 +444,39 @@ impl AstLowering {
                 },
             ],
             result: Some(Box::new(CExpr::LiteralInt(0))), // TODO: Return proper value
-        }
+        })
     }
 
-    fn lower_match_to_ternary(&self, expr: &Expr, arms: &[MatchArm]) -> CExpr {
-        let mut result = self.lower_default_match_arm();
+    fn lower_match_to_ternary(
+        &self,
+        expr: &Expr,
+        arms: &[MatchArm],
+    ) -> Result<CExpr, LoweringError> {
+        if arms.is_empty() {
+            return Err(LoweringError::NonExhaustiveMatch(
+                "Match expression has no arms".to_string(),
+            ));
+        }
 
-        for arm in arms.iter().rev() {
-            let condition = self.lower_pattern_check(expr, &arm.pattern);
-            let body = self.lower_match_arm_body(&arm.body);
+        let mut has_wildcard = false;
+        for arm in arms {
+            if matches!(arm.pattern, Pattern::Wildcard) {
+                has_wildcard = true;
+                break;
+            }
+        }
+
+        if !has_wildcard {
+            return Err(LoweringError::NonExhaustiveMatch(
+                "Match expression is not exhaustive - missing wildcard pattern".to_string(),
+            ));
+        }
+
+        let mut result = self.lower_match_arm_body(&arms.last().unwrap().body)?;
+
+        for arm in arms.iter().rev().skip(1) {
+            let condition = self.lower_pattern_check(expr, &arm.pattern)?;
+            let body = self.lower_match_arm_body(&arm.body)?;
 
             result = CExpr::Ternary {
                 cond: Box::new(condition),
@@ -412,7 +485,7 @@ impl AstLowering {
             };
         }
 
-        result
+        Ok(result)
     }
 
     fn get_unique_id(&self) -> u32 {
@@ -420,50 +493,54 @@ impl AstLowering {
         0
     }
 
-    fn lower_pattern_check(&self, expr: &Expr, pattern: &Pattern) -> CExpr {
+    fn lower_pattern_check(&self, expr: &Expr, pattern: &Pattern) -> Result<CExpr, LoweringError> {
         match pattern {
-            Pattern::Wildcard => CExpr::LiteralInt(1),
-            Pattern::Literal(lit) => CExpr::Binary {
+            Pattern::Wildcard => Ok(CExpr::LiteralInt(1)),
+            Pattern::Literal(lit) => Ok(CExpr::Binary {
                 op: CBinaryOp::Eq,
-                lhs: Box::new(self.lower_expr(expr)),
+                lhs: Box::new(self.lower_expr(expr)?),
                 rhs: Box::new(self.lower_literal(lit)),
-            },
-            Pattern::Variable(_) => CExpr::LiteralInt(1),
-            Pattern::EnumVariant { name, fields: _ } => CExpr::Binary {
+            }),
+            Pattern::Variable(_) => Ok(CExpr::LiteralInt(1)),
+            Pattern::EnumVariant { name, fields: _ } => Ok(CExpr::Binary {
                 op: CBinaryOp::Eq,
                 lhs: Box::new(CExpr::Member {
-                    base: Box::new(self.lower_expr(expr)),
+                    base: Box::new(self.lower_expr(expr)?),
                     member: "tag".to_string(),
                     arrow: false,
                 }),
                 rhs: Box::new(CExpr::Variable(format!("{}_Tag", name))),
-            },
+            }),
             Pattern::Or(patterns) => {
-                let mut result = self.lower_pattern_check(expr, &patterns[0]);
+                let mut result = self.lower_pattern_check(expr, &patterns[0])?;
                 for pattern in &patterns[1..] {
                     result = CExpr::Binary {
                         op: CBinaryOp::Or,
                         lhs: Box::new(result),
-                        rhs: Box::new(self.lower_pattern_check(expr, pattern)),
+                        rhs: Box::new(self.lower_pattern_check(expr, pattern)?),
                     };
                 }
-                result
+                Ok(result)
             }
         }
     }
 
-    fn lower_match_arm_body(&self, body: &[Stmt]) -> CExpr {
-        // For now, just take the last expression or return a default value
-        if let Some(Stmt::Expr(expr)) = body.last() {
-            self.lower_expr(expr)
-        } else {
-            CExpr::LiteralInt(0)
+    fn lower_match_arm_body(&self, body: &[Stmt]) -> Result<CExpr, LoweringError> {
+        if body.is_empty() {
+            return Err(LoweringError::UnexpectedError(
+                "Match arm body is empty".to_string(),
+            ));
         }
-    }
 
-    fn lower_default_match_arm(&self) -> CExpr {
-        // TODO: Handle non-exhaustive matches
-        CExpr::LiteralInt(0)
+        match body.last() {
+            Some(Stmt::Expr(expr)) => self.lower_expr(expr),
+            Some(_) => Err(LoweringError::UnexpectedError(
+                "Last statement in match arm must be an expression".to_string(),
+            )),
+            None => Err(LoweringError::UnexpectedError(
+                "Match arm body is empty".to_string(),
+            )),
+        }
     }
 }
 
