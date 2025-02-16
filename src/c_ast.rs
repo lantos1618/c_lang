@@ -151,9 +151,9 @@ pub enum CStmt {
 }
 
 #[derive(Debug, Clone)]
-pub struct CSwitchCase {
-    pub matches: Option<i64>,
-    pub body: Vec<CStmt>,
+pub enum CSwitchCase {
+    Case(CExpr, Box<CStmt>),
+    Default(Box<CStmt>),
 }
 
 #[derive(Debug, Clone)]
