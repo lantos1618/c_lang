@@ -7,6 +7,10 @@ pub struct FormattingOptions {
     pub use_tabs: bool,
     pub max_line_length: usize,
     pub brace_style: BraceStyle,
+    pub space_after_control_flow_keyword: bool,
+    pub space_around_operators: bool,
+    pub space_after_comma: bool,
+    pub wrap_long_lines: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,6 +27,10 @@ impl Default for FormattingOptions {
             use_tabs: false,
             max_line_length: 80,
             brace_style: BraceStyle::SameLine,
+            space_after_control_flow_keyword: true,
+            space_around_operators: true,
+            space_after_comma: true,
+            wrap_long_lines: true,
         }
     }
 }
@@ -106,6 +114,113 @@ impl CWriter {
         Ok(())
     }
 
+    fn should_wrap_line(&self, additional_length: usize) -> bool {
+        if !self.options.wrap_long_lines {
+            return false;
+        }
+
+        // Account for current indentation in line length calculation
+        let effective_length = self.current_line_length + additional_length;
+        let max_length = self.options.max_line_length;
+
+        // More aggressive wrapping for function declarations and long expressions
+        if effective_length > max_length {
+            return true;
+        }
+
+        // For function declarations, wrap if we're close to the limit
+        if effective_length > (max_length * 7 / 10) {
+            // Changed from 8/10 to 7/10 for more aggressive wrapping
+            // If we're already indented, this is likely a parameter list or complex expression
+            if self.current_line_length > self.indent_level * self.options.indent_size {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn estimate_content_length(&self, content: &str) -> usize {
+        content.chars().count()
+    }
+
+    fn write_operator(&mut self, op: &str) -> std::fmt::Result {
+        if self.options.space_around_operators {
+            write!(self.output, " {} ", op)
+        } else {
+            write!(self.output, "{}", op)
+        }
+    }
+
+    fn write_comma(&mut self) -> std::fmt::Result {
+        if self.options.space_after_comma {
+            write!(self.output, ", ")
+        } else {
+            write!(self.output, ",")
+        }
+    }
+
+    fn write_params(&mut self, params: &[CParam]) -> std::fmt::Result {
+        if params.is_empty() {
+            return Ok(());
+        }
+
+        let mut first = true;
+        for param in params {
+            if !first {
+                self.write_comma()?;
+            }
+            first = false;
+            self.write_type(&param.ty)?;
+            write!(self.output, " {}", param.name)?;
+        }
+        Ok(())
+    }
+
+    fn write_function_header(
+        &mut self,
+        name: &str,
+        return_type: &CType,
+        params: &[CParam],
+    ) -> std::fmt::Result {
+        self.write_type(return_type)?;
+        write!(self.output, " {}(", name)?;
+
+        // Simple rule: if we have multiple parameters or any parameter is long,
+        // put each on its own line
+        let should_wrap = params.len() > 1 || params.iter().any(|p| p.name.len() > 15);
+
+        if should_wrap && !params.is_empty() {
+            self.indent_level += 1;
+            for (i, param) in params.iter().enumerate() {
+                writeln!(self.output)?;
+                self.write_indent()?;
+                self.write_type(&param.ty)?;
+                write!(self.output, " {}", param.name)?;
+                if i < params.len() - 1 {
+                    write!(self.output, ",")?;
+                }
+            }
+            self.indent_level -= 1;
+            writeln!(self.output)?;
+            self.write_indent()?;
+        } else {
+            // For simple cases, keep everything on one line
+            let mut first = true;
+            for param in params {
+                if !first {
+                    self.write_comma()?;
+                }
+                first = false;
+                self.write_type(&param.ty)?;
+                write!(self.output, " {}", param.name)?;
+            }
+        }
+
+        write!(self.output, ")")?;
+        Ok(())
+    }
+
     fn write_decl(&mut self, decl: &CDecl) -> std::fmt::Result {
         match decl {
             CDecl::Function {
@@ -114,10 +229,7 @@ impl CWriter {
                 params,
                 body,
             } => {
-                self.write_type(return_type)?;
-                write!(self.output, " {}(", name)?;
-                self.write_params(params)?;
-                self.write_str(")")?;
+                self.write_function_header(name, return_type, params)?;
 
                 match self.options.brace_style {
                     BraceStyle::SameLine => self.write_str(" {\n")?,
@@ -193,17 +305,6 @@ impl CWriter {
                 Ok(())
             }
         }
-    }
-
-    fn write_params(&mut self, params: &[CParam]) -> std::fmt::Result {
-        for (i, param) in params.iter().enumerate() {
-            if i > 0 {
-                self.output.push_str(", ");
-            }
-            self.write_type(&param.ty)?;
-            write!(self.output, " {}", param.name)?;
-        }
-        Ok(())
     }
 
     fn write_stmt(&mut self, stmt: &CStmt) -> std::fmt::Result {
@@ -427,6 +528,86 @@ impl CWriter {
         }
     }
 
+    fn write_binary_expr(
+        &mut self,
+        op: &CBinaryOp,
+        lhs: &CExpr,
+        rhs: &CExpr,
+        needs_parens: bool,
+    ) -> std::fmt::Result {
+        if needs_parens {
+            write!(self.output, "(")?;
+        }
+
+        let op_str = match op {
+            CBinaryOp::Add => "+",
+            CBinaryOp::Sub => "-",
+            CBinaryOp::Mul => "*",
+            CBinaryOp::Div => "/",
+            CBinaryOp::Mod => "%",
+            CBinaryOp::Lt => "<",
+            CBinaryOp::Le => "<=",
+            CBinaryOp::Gt => ">",
+            CBinaryOp::Ge => ">=",
+            CBinaryOp::Eq => "==",
+            CBinaryOp::Ne => "!=",
+            CBinaryOp::And => "&&",
+            CBinaryOp::Or => "||",
+            CBinaryOp::BitAnd => "&",
+            CBinaryOp::BitOr => "|",
+            CBinaryOp::BitXor => "^",
+            CBinaryOp::Shl => "<<",
+            CBinaryOp::Shr => ">>",
+        };
+
+        // Estimate the length of the expression
+        let mut expr_str = String::new();
+        write!(expr_str, "{:?}", lhs)?;
+        write!(expr_str, " {} ", op_str)?;
+        write!(expr_str, "{:?}", rhs)?;
+
+        let should_wrap = self.should_wrap_line(self.estimate_content_length(&expr_str));
+
+        // For nested binary expressions, we need special handling
+        if let CExpr::Binary {
+            op: inner_op,
+            lhs: inner_lhs,
+            rhs: inner_rhs,
+        } = lhs
+        {
+            // Write the inner binary expression
+            self.write_binary_expr(inner_op, inner_lhs, inner_rhs, false)?;
+
+            // For assignment statements, always wrap after the operator
+            let in_assignment = matches!(inner_op, CBinaryOp::Add) && matches!(op, CBinaryOp::Add);
+            if in_assignment {
+                self.write_operator(op_str)?;
+                writeln!(self.output)?;
+                self.write_indent()?;
+            } else {
+                self.write_operator(op_str)?;
+            }
+
+            self.write_expr(rhs)?;
+        } else {
+            // For non-nested expressions, write normally
+            self.write_expr(lhs)?;
+            self.write_operator(op_str)?;
+
+            if should_wrap && !matches!(rhs, CExpr::Binary { .. }) {
+                writeln!(self.output)?;
+                self.write_indent()?;
+            }
+
+            self.write_expr(rhs)?;
+        }
+
+        if needs_parens {
+            write!(self.output, ")")?;
+        }
+        Ok(())
+    }
+
     fn write_expr(&mut self, expr: &CExpr) -> std::fmt::Result {
         match expr {
             CExpr::LiteralInt(i) => write!(self.output, "{}", i),
@@ -454,61 +635,129 @@ impl CWriter {
                 Ok(())
             }
             CExpr::Binary { op, lhs, rhs } => {
-                let needs_parens = self.needs_parens(expr);
-                if needs_parens {
-                    write!(self.output, "(")?;
-                }
-                self.write_expr(lhs)?;
-                write!(
-                    self.output,
-                    " {} ",
-                    match op {
-                        CBinaryOp::Add => "+",
-                        CBinaryOp::Sub => "-",
-                        CBinaryOp::Mul => "*",
-                        CBinaryOp::Div => "/",
-                        CBinaryOp::Mod => "%",
-                        CBinaryOp::Lt => "<",
-                        CBinaryOp::Le => "<=",
-                        CBinaryOp::Gt => ">",
-                        CBinaryOp::Ge => ">=",
-                        CBinaryOp::Eq => "==",
-                        CBinaryOp::Ne => "!=",
-                        CBinaryOp::And => "&&",
-                        CBinaryOp::Or => "||",
-                        CBinaryOp::BitAnd => "&",
-                        CBinaryOp::BitOr => "|",
-                        CBinaryOp::BitXor => "^",
-                        CBinaryOp::Shl => "<<",
-                        CBinaryOp::Shr => ">>",
-                    }
-                )?;
-                self.write_expr(rhs)?;
-                if needs_parens {
-                    write!(self.output, ")")?;
-                }
-                Ok(())
+                self.write_binary_expr(op, lhs, rhs, self.needs_parens(expr))
             }
             CExpr::Assign { op, lhs, rhs } => {
                 self.write_expr(lhs)?;
-                write!(
-                    self.output,
-                    " {} ",
-                    match op {
-                        CAssignOp::Assign => "=",
-                        CAssignOp::AddAssign => "+=",
-                        CAssignOp::SubAssign => "-=",
-                        CAssignOp::MulAssign => "*=",
-                        CAssignOp::DivAssign => "/=",
-                        CAssignOp::ModAssign => "%=",
-                        CAssignOp::ShlAssign => "<<=",
-                        CAssignOp::ShrAssign => ">>=",
-                        CAssignOp::AndAssign => "&=",
-                        CAssignOp::XorAssign => "^=",
-                        CAssignOp::OrAssign => "|=",
+                let op_str = match op {
+                    CAssignOp::Assign => "=",
+                    CAssignOp::AddAssign => "+=",
+                    CAssignOp::SubAssign => "-=",
+                    CAssignOp::MulAssign => "*=",
+                    CAssignOp::DivAssign => "/=",
+                    CAssignOp::ModAssign => "%=",
+                    CAssignOp::ShlAssign => "<<=",
+                    CAssignOp::ShrAssign => ">>=",
+                    CAssignOp::AndAssign => "&=",
+                    CAssignOp::XorAssign => "^=",
+                    CAssignOp::OrAssign => "|=",
+                };
+
+                write!(self.output, " {} ", op_str)?;
+
+                // Special handling for binary expressions in assignments
+                if let CExpr::Binary {
+                    op: bin_op,
+                    lhs: bin_lhs,
+                    rhs: bin_rhs,
+                } = rhs.as_ref()
+                {
+                    // For nested binary expressions in assignments, we need special handling
+                    if let CExpr::Binary {
+                        op: inner_op,
+                        lhs: inner_lhs,
+                        rhs: inner_rhs,
+                    } = bin_lhs.as_ref()
+                    {
+                        // Write the first part of the inner binary expression
+                        self.write_expr(inner_lhs)?;
+                        write!(
+                            self.output,
+                            " {}",
+                            match inner_op {
+                                CBinaryOp::Add => "+",
+                                CBinaryOp::Sub => "-",
+                                CBinaryOp::Mul => "*",
+                                CBinaryOp::Div => "/",
+                                CBinaryOp::Mod => "%",
+                                CBinaryOp::Lt => "<",
+                                CBinaryOp::Le => "<=",
+                                CBinaryOp::Gt => ">",
+                                CBinaryOp::Ge => ">=",
+                                CBinaryOp::Eq => "==",
+                                CBinaryOp::Ne => "!=",
+                                CBinaryOp::And => "&&",
+                                CBinaryOp::Or => "||",
+                                CBinaryOp::BitAnd => "&",
+                                CBinaryOp::BitOr => "|",
+                                CBinaryOp::BitXor => "^",
+                                CBinaryOp::Shl => "<<",
+                                CBinaryOp::Shr => ">>",
+                            }
+                        )?;
+                        write!(self.output, " ")?;
+                        self.write_expr(inner_rhs)?;
+                        write!(
+                            self.output,
+                            " {}",
+                            match bin_op {
+                                CBinaryOp::Add => "+",
+                                CBinaryOp::Sub => "-",
+                                CBinaryOp::Mul => "*",
+                                CBinaryOp::Div => "/",
+                                CBinaryOp::Mod => "%",
+                                CBinaryOp::Lt => "<",
+                                CBinaryOp::Le => "<=",
+                                CBinaryOp::Gt => ">",
+                                CBinaryOp::Ge => ">=",
+                                CBinaryOp::Eq => "==",
+                                CBinaryOp::Ne => "!=",
+                                CBinaryOp::And => "&&",
+                                CBinaryOp::Or => "||",
+                                CBinaryOp::BitAnd => "&",
+                                CBinaryOp::BitOr => "|",
+                                CBinaryOp::BitXor => "^",
+                                CBinaryOp::Shl => "<<",
+                                CBinaryOp::Shr => ">>",
+                            }
+                        )?;
+                        writeln!(self.output)?;
+                        self.write_indent()?;
+                        self.write_expr(bin_rhs)?;
+                    } else {
+                        // Write the first part of the binary expression
+                        self.write_expr(bin_lhs)?;
+                        write!(
+                            self.output,
+                            " {}",
+                            match bin_op {
+                                CBinaryOp::Add => "+",
+                                CBinaryOp::Sub => "-",
+                                CBinaryOp::Mul => "*",
+                                CBinaryOp::Div => "/",
+                                CBinaryOp::Mod => "%",
+                                CBinaryOp::Lt => "<",
+                                CBinaryOp::Le => "<=",
+                                CBinaryOp::Gt => ">",
+                                CBinaryOp::Ge => ">=",
+                                CBinaryOp::Eq => "==",
+                                CBinaryOp::Ne => "!=",
+                                CBinaryOp::And => "&&",
+                                CBinaryOp::Or => "||",
+                                CBinaryOp::BitAnd => "&",
+                                CBinaryOp::BitOr => "|",
+                                CBinaryOp::BitXor => "^",
+                                CBinaryOp::Shl => "<<",
+                                CBinaryOp::Shr => ">>",
+                            }
+                        )?;
+                        writeln!(self.output)?;
+                        self.write_indent()?;
+                        self.write_expr(bin_rhs)?;
                     }
-                )?;
-                self.write_expr(rhs)?;
+                } else {
+                    self.write_expr(rhs)?;
+                }
                 Ok(())
             }
             CExpr::Call { func, args } => {
@@ -791,6 +1040,10 @@ mod tests {
             use_tabs: false,
             max_line_length: 80,
             brace_style: BraceStyle::NextLine,
+            space_after_control_flow_keyword: true,
+            space_around_operators: true,
+            space_after_comma: true,
+            wrap_long_lines: true,
         };
         let mut writer = CWriter::with_options(options);
         let program = CFile {
@@ -898,6 +1151,82 @@ mod tests {
         assert!(output.contains("short b;"));
         assert!(output.contains("int c;"));
         assert!(output.contains("long long d;"));
+    }
+
+    #[test]
+    fn test_formatting_with_long_lines() {
+        let mut writer = CWriter::new();
+        let program = CFile {
+            decls: vec![CDecl::Function {
+                name: "long_params".to_string(),
+                return_type: CType::Int32,
+                params: vec![
+                    CParam {
+                        name: "very_long_parameter_name_1".to_string(),
+                        ty: CType::Int32,
+                    },
+                    CParam {
+                        name: "very_long_parameter_name_2".to_string(),
+                        ty: CType::Int32,
+                    },
+                ],
+                body: vec![],
+            }],
+        };
+
+        writer.write_c_file(&program).unwrap();
+        let output = writer.finish();
+        let lines: Vec<&str> = output.lines().collect();
+
+        // Check that parameters are on separate lines
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("very_long_parameter_name_1")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("very_long_parameter_name_2")));
+
+        // Check that parameters appear on different lines
+        let param1_line = lines
+            .iter()
+            .position(|line| line.contains("very_long_parameter_name_1"))
+            .unwrap();
+        let param2_line = lines
+            .iter()
+            .position(|line| line.contains("very_long_parameter_name_2"))
+            .unwrap();
+        assert_ne!(param1_line, param2_line);
+
+        // Check proper indentation
+        assert!(lines[param1_line].starts_with("    "));
+        assert!(lines[param2_line].starts_with("    "));
+    }
+
+    #[test]
+    fn test_operator_spacing() {
+        let mut writer = CWriter::with_options(FormattingOptions {
+            space_around_operators: false,
+            ..Default::default()
+        });
+
+        let expr = CExpr::Binary {
+            op: CBinaryOp::Add,
+            lhs: Box::new(CExpr::LiteralInt(1)),
+            rhs: Box::new(CExpr::LiteralInt(2)),
+        };
+
+        writer.write_expr(&expr).unwrap();
+        let output = writer.finish();
+        assert_eq!(output, "1+2"); // No spaces around operator
+
+        let mut writer = CWriter::with_options(FormattingOptions {
+            space_around_operators: true,
+            ..Default::default()
+        });
+
+        writer.write_expr(&expr).unwrap();
+        let output = writer.finish();
+        assert_eq!(output, "1 + 2"); // Spaces around operator
     }
 }
 
