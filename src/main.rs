@@ -1,16 +1,16 @@
 use c_ast::{CBinaryOp, CDecl, CExpr, CFile, CParam, CStmt, CType};
 
-fn main() {
+fn main() -> std::fmt::Result {
     // Create a simple C program that calculates factorial
     let factorial_program = CFile {
         decls: vec![
             // int factorial(int n)
             CDecl::Function {
                 name: "factorial".to_string(),
-                return_type: CType::Int,
+                return_type: CType::Int32,
                 params: vec![CParam {
                     name: "n".to_string(),
-                    ty: CType::Int,
+                    ty: CType::Int32,
                 }],
                 body: vec![
                     // if (n <= 1) return 1;
@@ -41,13 +41,13 @@ fn main() {
             // int main()
             CDecl::Function {
                 name: "main".to_string(),
-                return_type: CType::Int,
+                return_type: CType::Int32,
                 params: vec![],
                 body: vec![
                     // int result = factorial(5);
                     CStmt::Declaration {
                         name: "result".to_string(),
-                        ty: CType::Int,
+                        ty: CType::Int32,
                         init: Some(CExpr::Call {
                             func: Box::new(CExpr::Variable("factorial".to_string())),
                             args: vec![CExpr::LiteralInt(5)],
@@ -61,6 +61,7 @@ fn main() {
     };
 
     let mut writer = c_ast::CWriter::new();
-    writer.write_c_file(&factorial_program);
+    writer.write_c_file(&factorial_program)?;
     println!("{}", writer.finish());
+    Ok(())
 }

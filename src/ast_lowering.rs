@@ -4,20 +4,86 @@ use crate::high_level_ast::*;
 pub struct AstLowering {
     // State for the lowering process
     type_map: std::collections::HashMap<String, CType>,
+    next_id: std::sync::atomic::AtomicU32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceLocation {
+    pub line: usize,
+    pub column: usize,
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum LoweringError {
-    TypeNotFound(String),
-    InvalidType(String),
-    NonExhaustiveMatch(String),
-    UnexpectedError(String),
+    TypeNotFound {
+        type_name: String,
+        location: Option<SourceLocation>,
+    },
+    InvalidType {
+        type_name: String,
+        reason: String,
+        location: Option<SourceLocation>,
+    },
+    NonExhaustiveMatch {
+        message: String,
+        location: Option<SourceLocation>,
+    },
+    UnexpectedError {
+        message: String,
+        location: Option<SourceLocation>,
+    },
 }
+
+impl std::fmt::Display for LoweringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoweringError::TypeNotFound {
+                type_name,
+                location,
+            } => {
+                write!(f, "Type '{}' not found", type_name)?;
+                if let Some(loc) = location {
+                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                }
+                Ok(())
+            }
+            LoweringError::InvalidType {
+                type_name,
+                reason,
+                location,
+            } => {
+                write!(f, "Invalid type '{}': {}", type_name, reason)?;
+                if let Some(loc) = location {
+                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                }
+                Ok(())
+            }
+            LoweringError::NonExhaustiveMatch { message, location } => {
+                write!(f, "Non-exhaustive match: {}", message)?;
+                if let Some(loc) = location {
+                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                }
+                Ok(())
+            }
+            LoweringError::UnexpectedError { message, location } => {
+                write!(f, "Unexpected error: {}", message)?;
+                if let Some(loc) = location {
+                    write!(f, " at line {}, column {}", loc.line, loc.column)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LoweringError {}
 
 impl AstLowering {
     pub fn new() -> Self {
         Self {
             type_map: std::collections::HashMap::new(),
+            next_id: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -77,10 +143,17 @@ impl AstLowering {
             Type::Unit => Ok(CType::Void),
             Type::Bool => Ok(CType::Bool),
             Type::Int(size) => match size {
-                IntSize::I8 => Ok(CType::Char),
-                _ => Ok(CType::Int), // TODO: Add proper int sizes to CType
+                IntSize::I8 => Ok(CType::Int8),
+                IntSize::I16 => Ok(CType::Int16),
+                IntSize::I32 => Ok(CType::Int32),
+                IntSize::I64 => Ok(CType::Int64),
             },
-            Type::UInt(_) => Ok(CType::Int), // TODO: Add unsigned types to CType
+            Type::UInt(size) => match size {
+                IntSize::I8 => Ok(CType::UInt8),
+                IntSize::I16 => Ok(CType::UInt16),
+                IntSize::I32 => Ok(CType::UInt32),
+                IntSize::I64 => Ok(CType::UInt64),
+            },
             Type::Float(size) => match size {
                 FloatSize::F32 => Ok(CType::Float),
                 FloatSize::F64 => Ok(CType::Double),
@@ -92,18 +165,32 @@ impl AstLowering {
             Type::Reference(inner) => Ok(CType::Pointer(Box::new(self.lower_type(inner)?))),
             Type::Result(inner) => self.lower_type(inner), // TODO: Proper error handling
             Type::Struct(name) => {
-                self.type_map.get(name).cloned().ok_or_else(|| {
-                    LoweringError::TypeNotFound(format!("Struct {} not found", name))
-                })
+                self.type_map
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| LoweringError::TypeNotFound {
+                        type_name: name.clone(),
+                        location: None,
+                    })
             }
-            Type::Enum(name) => self
-                .type_map
-                .get(name)
-                .cloned()
-                .ok_or_else(|| LoweringError::TypeNotFound(format!("Enum {} not found", name))),
-            Type::Distinct(name, _) => self.type_map.get(name).cloned().ok_or_else(|| {
-                LoweringError::TypeNotFound(format!("Distinct type {} not found", name))
-            }),
+            Type::Enum(name) => {
+                self.type_map
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| LoweringError::TypeNotFound {
+                        type_name: name.clone(),
+                        location: None,
+                    })
+            }
+            Type::Distinct(name, _) => {
+                self.type_map
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| LoweringError::TypeNotFound {
+                        type_name: name.clone(),
+                        location: None,
+                    })
+            }
         }
     }
 
@@ -178,7 +265,7 @@ impl AstLowering {
             members: vec![
                 CStructMember {
                     name: "tag".to_string(),
-                    ty: CType::Int,
+                    ty: CType::Int32,
                 },
                 CStructMember {
                     name: "data".to_string(),
@@ -238,9 +325,11 @@ impl AstLowering {
                 let inferred_type = match ty {
                     Some(t) => self.lower_type(t)?,
                     None => {
-                        return Err(LoweringError::InvalidType(
-                            "Type inference not supported".to_string(),
-                        ))
+                        return Err(LoweringError::InvalidType {
+                            type_name: "Type inference not supported".to_string(),
+                            reason: "".to_string(),
+                            location: None,
+                        });
                     }
                 };
 
@@ -426,16 +515,17 @@ impl AstLowering {
         }
 
         if !has_default {
-            return Err(LoweringError::NonExhaustiveMatch(
-                "Match expression is not exhaustive".to_string(),
-            ));
+            return Err(LoweringError::NonExhaustiveMatch {
+                message: "Match expression is not exhaustive".to_string(),
+                location: None,
+            });
         }
 
         Ok(CExpr::Block {
             stmts: vec![
                 CStmt::Declaration {
                     name: switch_var.clone(),
-                    ty: CType::Int, // TODO: Infer proper type
+                    ty: CType::Int32, // Default to 32-bit integer
                     init: Some(self.lower_expr(expr)?),
                 },
                 CStmt::Switch {
@@ -443,7 +533,7 @@ impl AstLowering {
                     cases,
                 },
             ],
-            result: Some(Box::new(CExpr::LiteralInt(0))), // TODO: Return proper value
+            result: Some(Box::new(CExpr::LiteralInt(0))),
         })
     }
 
@@ -453,9 +543,10 @@ impl AstLowering {
         arms: &[MatchArm],
     ) -> Result<CExpr, LoweringError> {
         if arms.is_empty() {
-            return Err(LoweringError::NonExhaustiveMatch(
-                "Match expression has no arms".to_string(),
-            ));
+            return Err(LoweringError::NonExhaustiveMatch {
+                message: "Match expression has no arms".to_string(),
+                location: None,
+            });
         }
 
         let mut has_wildcard = false;
@@ -467,9 +558,11 @@ impl AstLowering {
         }
 
         if !has_wildcard {
-            return Err(LoweringError::NonExhaustiveMatch(
-                "Match expression is not exhaustive - missing wildcard pattern".to_string(),
-            ));
+            return Err(LoweringError::NonExhaustiveMatch {
+                message: "Match expression is not exhaustive - missing wildcard pattern"
+                    .to_string(),
+                location: None,
+            });
         }
 
         let mut result = self.lower_match_arm_body(&arms.last().unwrap().body)?;
@@ -489,8 +582,8 @@ impl AstLowering {
     }
 
     fn get_unique_id(&self) -> u32 {
-        // TODO: Implement proper unique ID generation
-        0
+        self.next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     fn lower_pattern_check(&self, expr: &Expr, pattern: &Pattern) -> Result<CExpr, LoweringError> {
@@ -527,19 +620,22 @@ impl AstLowering {
 
     fn lower_match_arm_body(&self, body: &[Stmt]) -> Result<CExpr, LoweringError> {
         if body.is_empty() {
-            return Err(LoweringError::UnexpectedError(
-                "Match arm body is empty".to_string(),
-            ));
+            return Err(LoweringError::UnexpectedError {
+                message: "Match arm body is empty".to_string(),
+                location: None,
+            });
         }
 
         match body.last() {
             Some(Stmt::Expr(expr)) => self.lower_expr(expr),
-            Some(_) => Err(LoweringError::UnexpectedError(
-                "Last statement in match arm must be an expression".to_string(),
-            )),
-            None => Err(LoweringError::UnexpectedError(
-                "Match arm body is empty".to_string(),
-            )),
+            Some(_) => Err(LoweringError::UnexpectedError {
+                message: "Last statement in match arm must be an expression".to_string(),
+                location: None,
+            }),
+            None => Err(LoweringError::UnexpectedError {
+                message: "Match arm body is empty".to_string(),
+                location: None,
+            }),
         }
     }
 }
@@ -584,7 +680,7 @@ mod tests {
                 body,
             } => {
                 assert_eq!(name, "add");
-                assert!(matches!(return_type, CType::Int));
+                assert!(matches!(return_type, CType::Int32));
                 assert_eq!(params.len(), 2);
                 assert_eq!(body.len(), 1);
             }
