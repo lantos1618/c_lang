@@ -334,14 +334,7 @@ impl CWriter {
             CSwitchCase::Case(value, stmt) => {
                 self.indent();
                 self.output.push_str("case ");
-                let needs_parens = self.needs_parens(value);
-                if needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(value);
-                if needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push_str(":\n");
                 self.indent_level += 1;
                 self.write_stmt(stmt);
@@ -357,62 +350,119 @@ impl CWriter {
         }
     }
 
+    fn get_precedence(&self, expr: &CExpr) -> i32 {
+        match expr {
+            CExpr::Variable(_) => 16, // Highest precedence
+            CExpr::LiteralInt(_) => 16,
+            CExpr::LiteralFloat(_) => 16,
+            CExpr::LiteralString(_) => 16,
+            CExpr::LiteralChar(_) => 16,
+            CExpr::Call { .. } => 15,
+            CExpr::Member { .. } => 15,
+            CExpr::Subscript { .. } => 15,
+            CExpr::PostIncrement(_) => 15,
+            CExpr::PostDecrement(_) => 15,
+            CExpr::Unary { op, .. } => match op {
+                CUnaryOp::Neg | CUnaryOp::Not | CUnaryOp::Tilde => 14,
+            },
+            CExpr::Cast { .. } => 14,
+            CExpr::AddrOf(_) => 14,
+            CExpr::Deref(_) => 14,
+            CExpr::Binary { op, .. } => match op {
+                CBinaryOp::Mul | CBinaryOp::Div | CBinaryOp::Mod => 13,
+                CBinaryOp::Add | CBinaryOp::Sub => 12,
+                CBinaryOp::Shl | CBinaryOp::Shr => 11,
+                CBinaryOp::Lt | CBinaryOp::Le | CBinaryOp::Gt | CBinaryOp::Ge => 10,
+                CBinaryOp::Eq | CBinaryOp::Ne => 9,
+                CBinaryOp::BitAnd => 8,
+                CBinaryOp::BitXor => 7,
+                CBinaryOp::BitOr => 6,
+                CBinaryOp::And => 5,
+                CBinaryOp::Or => 4,
+            },
+            CExpr::Ternary { .. } => 3,
+            CExpr::Assign { .. } => 2,
+            CExpr::Comma(_) => 1, // Lowest precedence
+        }
+    }
+
     fn needs_parens(&self, expr: &CExpr) -> bool {
         match expr {
-            CExpr::Variable(_) => true,
-            CExpr::LiteralInt(val) => *val == 0 || *val == 1,
-            CExpr::LiteralFloat(_) => true,
-            CExpr::LiteralString(_) => false,
-            CExpr::LiteralChar(_) => false,
-            CExpr::Binary { .. } => false,
-            CExpr::Unary { .. } => false,
-            CExpr::Ternary { .. } => false,
-            CExpr::PostIncrement(_) => false,
-            CExpr::PostDecrement(_) => false,
-            CExpr::Call { func: _, args: _ } => false,
-            CExpr::Member { .. } => false,
-            CExpr::Subscript { .. } => false,
-            CExpr::Assign { .. } => false,
-            CExpr::Cast { .. } => false,
-            CExpr::AddrOf(_) => false,
-            CExpr::Deref(_) => false,
-            CExpr::Comma(_) => false,
+            CExpr::Binary { op, lhs, rhs } => {
+                let parent_precedence = self.get_precedence(expr);
+
+                match rhs.as_ref() {
+                    CExpr::Binary { op: child_op, .. } => {
+                        let child_precedence = self.get_precedence(rhs);
+                        child_precedence < parent_precedence
+                            || (matches!(op, CBinaryOp::Mul)
+                                && matches!(child_op, CBinaryOp::Add | CBinaryOp::Sub))
+                    }
+                    _ => false,
+                }
+            }
+            CExpr::Unary { expr, .. } => {
+                let expr_precedence = self.get_precedence(expr);
+                let unary_precedence = 14; // Unary operators precedence
+                expr_precedence < unary_precedence
+            }
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let ternary_precedence = self.get_precedence(expr);
+                let cond_precedence = self.get_precedence(cond);
+                let then_precedence = self.get_precedence(then_expr);
+                let else_precedence = self.get_precedence(else_expr);
+
+                cond_precedence < ternary_precedence
+                    || then_precedence < ternary_precedence
+                    || else_precedence < ternary_precedence
+            }
+            CExpr::Deref(expr) => {
+                // Special case for dereferencing a binary operation
+                matches!(expr.as_ref(), CExpr::Binary { .. })
+            }
+            CExpr::Member { base, .. } => {
+                // Only need parens for member access if base is a binary operation
+                matches!(base.as_ref(), CExpr::Binary { .. })
+            }
+            CExpr::Subscript { base, index } => {
+                // Only need parens for array access if base is a binary operation
+                matches!(base.as_ref(), CExpr::Binary { .. })
+                    || matches!(index.as_ref(), CExpr::Binary { .. })
+            }
+            _ => false, // Other expressions don't need parentheses by default
         }
     }
 
     fn write_expr(&mut self, expr: &CExpr) {
         match expr {
             CExpr::LiteralInt(val) => {
-                if *val == 0 || *val == 1 {
-                    self.output.push('(');
-                    write!(self.output, "{}", val).unwrap();
-                    self.output.push(')');
-                } else {
-                    write!(self.output, "{}", val).unwrap();
-                }
+                write!(self.output, "{}", val).unwrap();
             }
             CExpr::LiteralFloat(val) => {
-                self.output.push('(');
                 write!(self.output, "{:.2}", val).unwrap();
-                self.output.push(')');
             }
             CExpr::LiteralString(val) => write!(self.output, "\"{}\"", val).unwrap(),
             CExpr::LiteralChar(c) => write!(self.output, "'{}'", c).unwrap(),
             CExpr::Variable(name) => {
-                self.output.push('(');
                 self.output.push_str(name);
-                self.output.push(')');
             }
             CExpr::Binary { op, lhs, rhs } => {
-                let lhs_needs_parens = self.needs_parens(lhs);
-                let rhs_needs_parens = self.needs_parens(rhs);
-                if lhs_needs_parens {
-                    self.output.push('(');
-                }
+                let needs_parens = match rhs.as_ref() {
+                    CExpr::Binary { op: rhs_op, .. } => {
+                        let rhs_precedence = self.get_precedence(rhs);
+                        let expr_precedence = self.get_precedence(expr);
+                        rhs_precedence < expr_precedence
+                            || (matches!(op, CBinaryOp::Mul)
+                                && matches!(rhs_op, CBinaryOp::Add | CBinaryOp::Sub))
+                    }
+                    _ => false,
+                };
+
                 self.write_expr(lhs);
-                if lhs_needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push(' ');
                 self.output.push_str(match op {
                     CBinaryOp::Add => "+",
@@ -435,26 +485,44 @@ impl CWriter {
                     CBinaryOp::Shr => ">>",
                 });
                 self.output.push(' ');
-                if rhs_needs_parens {
+                if needs_parens {
                     self.output.push('(');
                 }
                 self.write_expr(rhs);
-                if rhs_needs_parens {
+                if needs_parens {
                     self.output.push(')');
                 }
             }
             CExpr::Unary { op, expr } => match op {
                 CUnaryOp::Neg => {
                     self.output.push('-');
-                    self.write_expr(expr);
+                    if self.needs_parens(expr) {
+                        self.output.push('(');
+                        self.write_expr(expr);
+                        self.output.push(')');
+                    } else {
+                        self.write_expr(expr);
+                    }
                 }
                 CUnaryOp::Not => {
                     self.output.push('!');
-                    self.write_expr(expr);
+                    if self.needs_parens(expr) {
+                        self.output.push('(');
+                        self.write_expr(expr);
+                        self.output.push(')');
+                    } else {
+                        self.write_expr(expr);
+                    }
                 }
                 CUnaryOp::Tilde => {
                     self.output.push('~');
-                    self.write_expr(expr);
+                    if self.needs_parens(expr) {
+                        self.output.push('(');
+                        self.write_expr(expr);
+                        self.output.push(')');
+                    } else {
+                        self.write_expr(expr);
+                    }
                 }
             },
             CExpr::Call { func, args } => {
@@ -472,22 +540,23 @@ impl CWriter {
                 base,
                 member,
                 arrow,
-            } => {
-                if let CExpr::Deref(inner) = &**base {
+            } => match &**base {
+                CExpr::Deref(inner) => {
                     self.output.push('(');
                     self.output.push('*');
-                    self.write_expr(inner);
-                    self.output.push_str(")->");
-                    self.output.push_str(member);
-                } else {
-                    let base_needs_parens = self.needs_parens(base);
-                    if base_needs_parens {
+                    if matches!(inner.as_ref(), CExpr::Binary { .. }) {
                         self.output.push('(');
                     }
-                    self.write_expr(base);
-                    if base_needs_parens {
+                    self.write_expr(inner);
+                    if matches!(inner.as_ref(), CExpr::Binary { .. }) {
                         self.output.push(')');
                     }
+                    self.output.push(')');
+                    self.output.push_str("->");
+                    self.output.push_str(member);
+                }
+                _ => {
+                    self.write_expr(base);
                     if *arrow {
                         self.output.push_str("->");
                     } else {
@@ -495,37 +564,15 @@ impl CWriter {
                     }
                     self.output.push_str(member);
                 }
-            }
+            },
             CExpr::Subscript { base, index } => {
-                let base_needs_parens = self.needs_parens(base);
-                if base_needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(base);
-                if base_needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push('[');
-                let index_needs_parens = self.needs_parens(index);
-                if index_needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(index);
-                if index_needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push(']');
             }
             CExpr::Assign { op, lhs, rhs } => {
-                let lhs_needs_parens = self.needs_parens(lhs);
-                let rhs_needs_parens = self.needs_parens(rhs);
-                if lhs_needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(lhs);
-                if lhs_needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push(' ');
                 self.output.push_str(match op {
                     CAssignOp::Assign => "=",
@@ -541,13 +588,7 @@ impl CWriter {
                     CAssignOp::OrAssign => "|=",
                 });
                 self.output.push(' ');
-                if rhs_needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(rhs);
-                if rhs_needs_parens {
-                    self.output.push(')');
-                }
             }
             CExpr::Cast { to, expr } => {
                 self.output.push('(');
@@ -564,25 +605,11 @@ impl CWriter {
                 self.write_expr(expr);
             }
             CExpr::PostIncrement(expr) => {
-                let needs_parens = self.needs_parens(expr);
-                if needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(expr);
-                if needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push_str("++");
             }
             CExpr::PostDecrement(expr) => {
-                let needs_parens = self.needs_parens(expr);
-                if needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(expr);
-                if needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push_str("--");
             }
             CExpr::Ternary {
@@ -590,32 +617,11 @@ impl CWriter {
                 then_expr,
                 else_expr,
             } => {
-                let cond_needs_parens = self.needs_parens(cond);
-                let then_needs_parens = self.needs_parens(then_expr);
-                let else_needs_parens = self.needs_parens(else_expr);
-                if cond_needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(cond);
-                if cond_needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push_str(" ? ");
-                if then_needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(then_expr);
-                if then_needs_parens {
-                    self.output.push(')');
-                }
                 self.output.push_str(" : ");
-                if else_needs_parens {
-                    self.output.push('(');
-                }
                 self.write_expr(else_expr);
-                if else_needs_parens {
-                    self.output.push(')');
-                }
             }
             CExpr::Comma(exprs) => {
                 for (i, expr) in exprs.iter().enumerate() {
@@ -715,7 +721,7 @@ mod tests {
         assert_writes_to(
             &file,
             "int add(int a, int b) {
-    return ((a)) + ((b));
+    return a + b;
 }",
         );
     }
@@ -834,11 +840,11 @@ mod tests {
         assert_writes_to(
             &file,
             "int abs(int x) {
-    if (((x)) < ((0))) {
-        return -(x);
+    if (x < 0) {
+        return -x;
     }
     else {
-        return (x);
+        return x;
     }
 }",
         );
@@ -884,7 +890,6 @@ mod tests {
             return_type: CType::Void,
             params: vec![],
             body: vec![
-                // For loop
                 CStmt::For {
                     init: Some(Box::new(CStmt::Declaration {
                         name: "i".to_string(),
@@ -901,12 +906,10 @@ mod tests {
                     )))),
                     body: Box::new(CStmt::Block(vec![CStmt::Continue])),
                 },
-                // While loop
                 CStmt::While {
                     cond: CExpr::LiteralInt(1),
                     body: Box::new(CStmt::Break),
                 },
-                // Do-while loop
                 CStmt::DoWhile {
                     body: Box::new(CStmt::Expression(CExpr::PostIncrement(Box::new(
                         CExpr::Variable("x".to_string()),
@@ -924,19 +927,19 @@ mod tests {
         assert_writes_to(
             &file,
             "void loop_example() {
-    for (int i = (0); ((i)) < 10; ((i))++)
+    for (int i = 0; i < 10; i++)
     {
         continue;
     }
-    while ((1))
+    while (1)
     {
         break;
     }
     do
     {
-        ((x))++;
+        x++;
     }
-    while (((x)) < 5);
+    while (x < 5);
 }",
         );
     }
@@ -948,7 +951,6 @@ mod tests {
             return_type: CType::Int,
             params: vec![],
             body: vec![
-                // Test various expressions
                 CStmt::Expression(CExpr::Assign {
                     op: CAssignOp::AddAssign,
                     lhs: Box::new(CExpr::Variable("x".to_string())),
@@ -971,10 +973,10 @@ mod tests {
         assert_writes_to(
             &file,
             "int expr_test() {
-    ((x)) += ((3.14));
-    (printf)(\"Hello %d\\n\");
-    ((flag)) ? ((1)) : ((0));
-    return (0);
+    x += 3.14;
+    printf(\"Hello %d\\n\");
+    flag ? 1 : 0;
+    return 0;
 }",
         );
     }
@@ -1013,7 +1015,6 @@ mod tests {
                         index: Box::new(CExpr::LiteralInt(0)),
                     }),
                 }),
-                // Test regular member access too
                 CStmt::Expression(CExpr::Assign {
                     op: CAssignOp::Assign,
                     lhs: Box::new(CExpr::Member {
@@ -1030,8 +1031,8 @@ mod tests {
         assert_writes_to(
             &file,
             "void member_test() {
-    (*(ptr))->field = ((array))[((0))];
-    ((obj)).value = 42;
+    (*ptr)->field = array[0];
+    obj.value = 42;
 }",
         );
     }
@@ -1065,16 +1066,241 @@ mod tests {
         assert_writes_to(
             &file,
             "int switch_test(int x) {
-    switch ((x))
+    switch (x)
     {
-        case ((1)):
-            return (1);
+        case 1:
+            return 1;
         case 2:
             return 2;
         default:
-            return (0);
+            return 0;
     }
 }",
         );
+    }
+
+    #[test]
+    fn test_operator_precedence() {
+        // Test cases for operator precedence and parentheses
+        let test_cases = vec![
+            // Basic arithmetic
+            (
+                CExpr::Binary {
+                    op: CBinaryOp::Add,
+                    lhs: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Mul,
+                        lhs: Box::new(CExpr::Variable("a".to_string())),
+                        rhs: Box::new(CExpr::Variable("b".to_string())),
+                    }),
+                    rhs: Box::new(CExpr::Variable("c".to_string())),
+                },
+                "a * b + c",
+            ),
+            // Function call
+            (
+                CExpr::Call {
+                    func: Box::new(CExpr::Variable("func".to_string())),
+                    args: vec![CExpr::Variable("x".to_string())],
+                },
+                "func(x)",
+            ),
+            // Member access
+            (
+                CExpr::Member {
+                    base: Box::new(CExpr::Variable("obj".to_string())),
+                    member: "field".to_string(),
+                    arrow: false,
+                },
+                "obj.field",
+            ),
+            // Complex expression
+            (
+                CExpr::Binary {
+                    op: CBinaryOp::Add,
+                    lhs: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Mul,
+                        lhs: Box::new(CExpr::Variable("a".to_string())),
+                        rhs: Box::new(CExpr::Variable("b".to_string())),
+                    }),
+                    rhs: Box::new(CExpr::Call {
+                        func: Box::new(CExpr::Variable("func".to_string())),
+                        args: vec![CExpr::Variable("c".to_string())],
+                    }),
+                },
+                "a * b + func(c)",
+            ),
+            // Assignment
+            (
+                CExpr::Assign {
+                    op: CAssignOp::Assign,
+                    lhs: Box::new(CExpr::Variable("x".to_string())),
+                    rhs: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Add,
+                        lhs: Box::new(CExpr::Variable("y".to_string())),
+                        rhs: Box::new(CExpr::Variable("z".to_string())),
+                    }),
+                },
+                "x = y + z",
+            ),
+            // Unary operators
+            (
+                CExpr::Unary {
+                    op: CUnaryOp::Not,
+                    expr: Box::new(CExpr::Variable("x".to_string())),
+                },
+                "!x",
+            ),
+            // Post increment
+            (
+                CExpr::PostIncrement(Box::new(CExpr::Variable("i".to_string()))),
+                "i++",
+            ),
+            // Array access
+            (
+                CExpr::Subscript {
+                    base: Box::new(CExpr::Variable("arr".to_string())),
+                    index: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Add,
+                        lhs: Box::new(CExpr::Variable("i".to_string())),
+                        rhs: Box::new(CExpr::LiteralInt(1)),
+                    }),
+                },
+                "arr[i + 1]",
+            ),
+            // Pointer dereference
+            (
+                CExpr::Deref(Box::new(CExpr::Variable("ptr".to_string()))),
+                "*ptr",
+            ),
+            // Address of
+            (
+                CExpr::AddrOf(Box::new(CExpr::Variable("var".to_string()))),
+                "&var",
+            ),
+            // Ternary operator
+            (
+                CExpr::Ternary {
+                    cond: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Lt,
+                        lhs: Box::new(CExpr::Variable("x".to_string())),
+                        rhs: Box::new(CExpr::LiteralInt(0)),
+                    }),
+                    then_expr: Box::new(CExpr::Unary {
+                        op: CUnaryOp::Neg,
+                        expr: Box::new(CExpr::Variable("x".to_string())),
+                    }),
+                    else_expr: Box::new(CExpr::Variable("x".to_string())),
+                },
+                "x < 0 ? -x : x",
+            ),
+        ];
+
+        let mut writer = CWriter::new();
+        for (expr, expected) in test_cases {
+            writer.output.clear();
+            writer.write_expr(&expr);
+            assert_eq!(writer.output.trim(), expected);
+        }
+    }
+
+    #[test]
+    fn test_complex_operator_precedence() {
+        let test_cases = vec![
+            // Complex arithmetic with mixed precedence
+            (
+                CExpr::Binary {
+                    op: CBinaryOp::Add,
+                    lhs: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Mul,
+                        lhs: Box::new(CExpr::Variable("a".to_string())),
+                        rhs: Box::new(CExpr::Binary {
+                            op: CBinaryOp::Add,
+                            lhs: Box::new(CExpr::Variable("b".to_string())),
+                            rhs: Box::new(CExpr::Variable("c".to_string())),
+                        }),
+                    }),
+                    rhs: Box::new(CExpr::Variable("d".to_string())),
+                },
+                "a * (b + c) + d",
+            ),
+            // Nested logical operators
+            (
+                CExpr::Binary {
+                    op: CBinaryOp::And,
+                    lhs: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Lt,
+                        lhs: Box::new(CExpr::Variable("x".to_string())),
+                        rhs: Box::new(CExpr::LiteralInt(10)),
+                    }),
+                    rhs: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Gt,
+                        lhs: Box::new(CExpr::Variable("x".to_string())),
+                        rhs: Box::new(CExpr::LiteralInt(0)),
+                    }),
+                },
+                "x < 10 && x > 0",
+            ),
+            // Complex assignment with arithmetic
+            (
+                CExpr::Assign {
+                    op: CAssignOp::AddAssign,
+                    lhs: Box::new(CExpr::Variable("x".to_string())),
+                    rhs: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Mul,
+                        lhs: Box::new(CExpr::Variable("y".to_string())),
+                        rhs: Box::new(CExpr::Binary {
+                            op: CBinaryOp::Add,
+                            lhs: Box::new(CExpr::Variable("z".to_string())),
+                            rhs: Box::new(CExpr::LiteralInt(1)),
+                        }),
+                    }),
+                },
+                "x += y * (z + 1)",
+            ),
+            // Nested ternary with logical operators
+            (
+                CExpr::Ternary {
+                    cond: Box::new(CExpr::Binary {
+                        op: CBinaryOp::Lt,
+                        lhs: Box::new(CExpr::Variable("x".to_string())),
+                        rhs: Box::new(CExpr::LiteralInt(0)),
+                    }),
+                    then_expr: Box::new(CExpr::Unary {
+                        op: CUnaryOp::Neg,
+                        expr: Box::new(CExpr::Variable("x".to_string())),
+                    }),
+                    else_expr: Box::new(CExpr::Ternary {
+                        cond: Box::new(CExpr::Binary {
+                            op: CBinaryOp::Gt,
+                            lhs: Box::new(CExpr::Variable("x".to_string())),
+                            rhs: Box::new(CExpr::LiteralInt(10)),
+                        }),
+                        then_expr: Box::new(CExpr::LiteralInt(10)),
+                        else_expr: Box::new(CExpr::Variable("x".to_string())),
+                    }),
+                },
+                "x < 0 ? -x : x > 10 ? 10 : x",
+            ),
+            // Complex pointer and member access
+            (
+                CExpr::Member {
+                    base: Box::new(CExpr::Deref(Box::new(CExpr::Binary {
+                        op: CBinaryOp::Add,
+                        lhs: Box::new(CExpr::Variable("ptr".to_string())),
+                        rhs: Box::new(CExpr::LiteralInt(1)),
+                    }))),
+                    member: "field".to_string(),
+                    arrow: true,
+                },
+                "(*(ptr + 1))->field",
+            ),
+        ];
+
+        let mut writer = CWriter::new();
+        for (expr, expected) in test_cases {
+            writer.output.clear();
+            writer.write_expr(&expr);
+            assert_eq!(writer.output.trim(), expected);
+        }
     }
 }

@@ -26,7 +26,7 @@ pub enum CUnaryOp {
     Tilde,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum CBinaryOp {
     Add,
     Sub,
