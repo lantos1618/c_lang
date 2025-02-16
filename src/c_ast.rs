@@ -57,6 +57,32 @@ pub enum CBinaryOp {
     Shr,
 }
 
+impl std::fmt::Display for CBinaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let op_str = match self {
+            CBinaryOp::Add => "+",
+            CBinaryOp::Sub => "-",
+            CBinaryOp::Mul => "*",
+            CBinaryOp::Div => "/",
+            CBinaryOp::Mod => "%",
+            CBinaryOp::Lt => "<",
+            CBinaryOp::Le => "<=",
+            CBinaryOp::Gt => ">",
+            CBinaryOp::Ge => ">=",
+            CBinaryOp::Eq => "==",
+            CBinaryOp::Ne => "!=",
+            CBinaryOp::And => "&&",
+            CBinaryOp::Or => "||",
+            CBinaryOp::BitAnd => "&",
+            CBinaryOp::BitOr => "|",
+            CBinaryOp::BitXor => "^",
+            CBinaryOp::Shl => "<<",
+            CBinaryOp::Shr => ">>",
+        };
+        write!(f, "{}", op_str)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CAssignOp {
     Assign,

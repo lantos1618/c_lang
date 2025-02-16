@@ -485,16 +485,33 @@ impl AstLowering {
                 })
             }
             Stmt::While { cond, body } => {
-                let mut c_body = Vec::new();
-                for stmt in body {
-                    c_body.push(self.lower_stmt(stmt)?);
-                }
+                // Check if this is a while-break pattern that can be converted to an if
+                if body.len() >= 2
+                    && matches!(body.last(), Some(Stmt::Break))
+                    && matches!(body[0], Stmt::Return(_))
+                {
+                    // Convert to if statement
+                    let mut if_body = Vec::new();
+                    for stmt in body.iter().take(body.len() - 1) {
+                        if_body.push(self.lower_stmt(stmt)?);
+                    }
+                    Ok(CStmt::If {
+                        cond: self.lower_expr(cond)?,
+                        then_branch: Box::new(CStmt::Block(if_body)),
+                        else_branch: None,
+                    })
+                } else {
+                    let mut c_body = Vec::new();
+                    for stmt in body {
+                        c_body.push(self.lower_stmt(stmt)?);
+                    }
 
-                let lowered_cond = self.lower_expr(cond)?;
-                Ok(CStmt::While {
-                    cond: lowered_cond,
-                    body: Box::new(CStmt::Block(c_body)),
-                })
+                    let lowered_cond = self.lower_expr(cond)?;
+                    Ok(CStmt::While {
+                        cond: lowered_cond,
+                        body: Box::new(CStmt::Block(c_body)),
+                    })
+                }
             }
             Stmt::Break => Ok(CStmt::Break),
             Stmt::Continue => Ok(CStmt::Continue),

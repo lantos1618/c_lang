@@ -1,6 +1,24 @@
 [package]
-name = "c_ast"
+name = "c_lang"
 version = "0.1.0"
 edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A high-level language that compiles to C"
+license = "MIT"
 
-[dependencies] 
+[lib]
+name = "c_lang"
+path = "src/lib.rs"
+
+[[bin]]
+name = "c_lang_compiler"
+path = "src/bin/compiler.rs"
+
+[dependencies]
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.10"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+test-case = "3.3"

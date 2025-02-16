@@ -341,9 +341,31 @@ impl CWriter {
                 write!(self.output, "if (")?;
                 self.write_expr(cond)?;
                 write!(self.output, ") ")?;
-                self.write_stmt(then_branch)?;
+
+                match then_branch.as_ref() {
+                    CStmt::Block(stmts) => {
+                        writeln!(self.output, "{{")?;
+                        self.indent_level += 1;
+                        for stmt in stmts {
+                            self.write_indent()?;
+                            self.write_stmt(stmt)?;
+                        }
+                        self.indent_level -= 1;
+                        self.write_indent()?;
+                        write!(self.output, "}}")?;
+                    }
+                    _ => {
+                        self.indent_level += 1;
+                        self.write_indent()?;
+                        self.write_stmt(then_branch)?;
+                        self.indent_level -= 1;
+                    }
+                }
+
                 if let Some(else_stmt) = else_branch {
-                    write!(self.output, " else ")?;
+                    writeln!(self.output)?;
+                    self.write_indent()?;
+                    write!(self.output, "else ")?;
                     self.write_stmt(else_stmt)?;
                 }
                 Ok(())
@@ -535,75 +557,33 @@ impl CWriter {
         rhs: &CExpr,
         needs_parens: bool,
     ) -> std::fmt::Result {
-        if needs_parens {
-            write!(self.output, "(")?;
-        }
-
-        let op_str = match op {
-            CBinaryOp::Add => "+",
-            CBinaryOp::Sub => "-",
-            CBinaryOp::Mul => "*",
-            CBinaryOp::Div => "/",
-            CBinaryOp::Mod => "%",
-            CBinaryOp::Lt => "<",
-            CBinaryOp::Le => "<=",
-            CBinaryOp::Gt => ">",
-            CBinaryOp::Ge => ">=",
-            CBinaryOp::Eq => "==",
-            CBinaryOp::Ne => "!=",
-            CBinaryOp::And => "&&",
-            CBinaryOp::Or => "||",
-            CBinaryOp::BitAnd => "&",
-            CBinaryOp::BitOr => "|",
-            CBinaryOp::BitXor => "^",
-            CBinaryOp::Shl => "<<",
-            CBinaryOp::Shr => ">>",
+        let expr_str = {
+            let mut temp_writer = CWriter::with_options(self.options.clone());
+            if needs_parens {
+                temp_writer.write_char('(')?;
+            }
+            temp_writer.write_expr(lhs)?;
+            temp_writer.write_operator(&op.to_string())?;
+            temp_writer.write_expr(rhs)?;
+            if needs_parens {
+                temp_writer.write_char(')')?;
+            }
+            temp_writer.finish()
         };
 
-        // Estimate the length of the expression
-        let mut expr_str = String::new();
-        write!(expr_str, "{:?}", lhs)?;
-        write!(expr_str, " {} ", op_str)?;
-        write!(expr_str, "{:?}", rhs)?;
-
-        let should_wrap = self.should_wrap_line(self.estimate_content_length(&expr_str));
-
-        // For nested binary expressions, we need special handling
-        if let CExpr::Binary {
-            op: inner_op,
-            lhs: inner_lhs,
-            rhs: inner_rhs,
-        } = lhs
-        {
-            // Write the inner binary expression
-            self.write_binary_expr(inner_op, inner_lhs, inner_rhs, false)?;
-
-            // For assignment statements, always wrap after the operator
-            let in_assignment = matches!(inner_op, CBinaryOp::Add) && matches!(op, CBinaryOp::Add);
-            if in_assignment {
-                self.write_operator(op_str)?;
-                writeln!(self.output)?;
-                self.write_indent()?;
-            } else {
-                self.write_operator(op_str)?;
+        // Only wrap if the expression is too long
+        if self.should_wrap_line(expr_str.len()) {
+            if needs_parens {
+                self.write_char('(')?;
             }
-
-            self.write_expr(rhs)?;
-        } else {
-            // For non-nested expressions, write normally
             self.write_expr(lhs)?;
-            self.write_operator(op_str)?;
-
-            if should_wrap && !matches!(rhs, CExpr::Binary { .. }) {
-                writeln!(self.output)?;
-                self.write_indent()?;
-            }
-
+            self.write_operator(&op.to_string())?;
             self.write_expr(rhs)?;
-        }
-
-        if needs_parens {
-            write!(self.output, ")")?;
+            if needs_parens {
+                self.write_char(')')?;
+            }
+        } else {
+            self.write_str(&expr_str)?;
         }
         Ok(())
     }
