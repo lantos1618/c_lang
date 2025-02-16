@@ -164,6 +164,15 @@ impl CompilerError {
     }
 }
 
+impl From<std::io::Error> for CompilerError {
+    fn from(error: std::io::Error) -> Self {
+        CompilerError::IoError {
+            message: error.to_string(),
+            source: error,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, CompilerError>;
 
 // Convenience macros for error creation

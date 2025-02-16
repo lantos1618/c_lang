@@ -1,31 +1,13 @@
 use crate::c_ast::*;
+use crate::errors::SourceLocation;
 use crate::high_level_ast::*;
 
 pub struct AstLowering {
     // State for the lowering process
     type_map: std::collections::HashMap<String, CType>,
     next_id: std::sync::atomic::AtomicU32,
-}
-
-#[derive(Debug, Clone)]
-pub struct SourceLocation {
-    pub line: usize,
-    pub column: usize,
-    pub file: Option<String>,
-}
-
-impl SourceLocation {
-    pub fn new(line: usize, column: usize, file: Option<String>) -> Self {
-        Self { line, column, file }
-    }
-
-    pub fn unknown() -> Self {
-        Self {
-            line: 0,
-            column: 0,
-            file: None,
-        }
-    }
+    variables_in_scope: std::collections::HashSet<String>,
+    function_names: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +35,10 @@ pub enum LoweringError {
         context: String,
         location: Option<SourceLocation>,
     },
+    UndefinedVariable {
+        name: String,
+        location: Option<SourceLocation>,
+    },
     UnexpectedError {
         message: String,
         location: Option<SourceLocation>,
@@ -60,6 +46,18 @@ pub enum LoweringError {
 }
 
 impl LoweringError {
+    pub fn location(&self) -> Option<&SourceLocation> {
+        match self {
+            Self::TypeNotFound { location, .. } => location.as_ref(),
+            Self::InvalidType { location, .. } => location.as_ref(),
+            Self::NonExhaustiveMatch { location, .. } => location.as_ref(),
+            Self::UnsupportedFeature { location, .. } => location.as_ref(),
+            Self::InvalidOperator { location, .. } => location.as_ref(),
+            Self::UndefinedVariable { location, .. } => location.as_ref(),
+            Self::UnexpectedError { location, .. } => location.as_ref(),
+        }
+    }
+
     pub fn with_location(self, location: SourceLocation) -> Self {
         match self {
             Self::TypeNotFound { type_name, .. } => Self::TypeNotFound {
@@ -89,6 +87,10 @@ impl LoweringError {
             } => Self::InvalidOperator {
                 operator,
                 context,
+                location: Some(location),
+            },
+            Self::UndefinedVariable { name, .. } => Self::UndefinedVariable {
+                name,
                 location: Some(location),
             },
             Self::UnexpectedError { message, .. } => Self::UnexpectedError {
@@ -182,6 +184,19 @@ impl std::fmt::Display for LoweringError {
                 }
                 Ok(())
             }
+            LoweringError::UndefinedVariable { name, location } => {
+                write!(f, "Undefined variable '{}'", name)?;
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        loc.file.as_deref().unwrap_or("<unknown>"),
+                        loc.line,
+                        loc.column
+                    )?;
+                }
+                Ok(())
+            }
             LoweringError::UnexpectedError { message, location } => {
                 write!(f, "Unexpected error: {}", message)?;
                 if let Some(loc) = location {
@@ -206,13 +221,15 @@ impl AstLowering {
         Self {
             type_map: std::collections::HashMap::new(),
             next_id: std::sync::atomic::AtomicU32::new(0),
+            variables_in_scope: std::collections::HashSet::new(),
+            function_names: std::collections::HashSet::new(),
         }
     }
 
     pub fn lower_module(&mut self, module: &Module) -> Result<CFile, LoweringError> {
         let mut decls = Vec::new();
 
-        // First pass: collect all type definitions
+        // First pass: collect all type and function declarations
         for decl in &module.decls {
             match decl {
                 Decl::Struct(struct_def) => {
@@ -230,7 +247,10 @@ impl AstLowering {
                     self.type_map
                         .insert(distinct_def.name.clone(), underlying.clone());
                 }
-                _ => {}
+                Decl::Function { name, .. } => {
+                    // Add function name to global scope
+                    self.function_names.insert(name.clone());
+                }
             }
         }
 
@@ -242,6 +262,7 @@ impl AstLowering {
                     params,
                     return_type,
                     body,
+                    location: _,
                 } => {
                     decls.push(self.lower_function(name, params, return_type, body)?);
                 }
@@ -317,12 +338,20 @@ impl AstLowering {
     }
 
     fn lower_function(
-        &self,
+        &mut self,
         name: &str,
         params: &[Parameter],
         return_type: &Type,
         body: &Option<Vec<Stmt>>,
     ) -> Result<CDecl, LoweringError> {
+        // Clear local variables from previous function
+        self.variables_in_scope.clear();
+
+        // Add parameters to scope
+        for param in params {
+            self.variables_in_scope.insert(param.name.clone());
+        }
+
         let c_params = params
             .iter()
             .map(|p| -> Result<CParam, LoweringError> {
@@ -441,21 +470,28 @@ impl AstLowering {
         })
     }
 
-    fn lower_stmt(&self, stmt: &Stmt) -> Result<CStmt, LoweringError> {
+    fn lower_stmt(&mut self, stmt: &Stmt) -> Result<CStmt, LoweringError> {
         match stmt {
-            Stmt::Let { name, ty, value } => {
+            Stmt::Let {
+                name,
+                ty,
+                value,
+                location,
+            } => {
                 let inferred_type = match ty {
                     Some(t) => self.lower_type(t)?,
                     None => {
                         return Err(LoweringError::InvalidType {
                             type_name: "Type inference not supported".to_string(),
                             reason: "".to_string(),
-                            location: None,
+                            location: Some(location.clone()),
                         });
                     }
                 };
 
                 let init_expr = self.lower_expr(value)?;
+                // Add variable to scope
+                self.variables_in_scope.insert(name.clone());
                 Ok(CStmt::Declaration {
                     name: name.clone(),
                     ty: inferred_type,
@@ -473,7 +509,7 @@ impl AstLowering {
                 };
                 Ok(CStmt::Return(lowered_expr))
             }
-            Stmt::Loop { body } => {
+            Stmt::Loop { body, location: _ } => {
                 let mut c_body = Vec::new();
                 for stmt in body {
                     c_body.push(self.lower_stmt(stmt)?);
@@ -484,7 +520,11 @@ impl AstLowering {
                     body: Box::new(CStmt::Block(c_body)),
                 })
             }
-            Stmt::While { cond, body } => {
+            Stmt::While {
+                cond,
+                body,
+                location: _,
+            } => {
                 // Check if this is a while-break pattern that can be converted to an if
                 if body.len() >= 2
                     && matches!(body.last(), Some(Stmt::Break))
@@ -528,8 +568,21 @@ impl AstLowering {
     fn lower_expr(&self, expr: &Expr) -> Result<CExpr, LoweringError> {
         match expr {
             Expr::Literal(lit) => Ok(self.lower_literal(lit)),
-            Expr::Variable(name) => Ok(CExpr::Variable(name.clone())),
-            Expr::Binary { op, left, right } => {
+            Expr::Variable { name, location } => {
+                if !self.variables_in_scope.contains(name) && !self.function_names.contains(name) {
+                    return Err(LoweringError::UndefinedVariable {
+                        name: name.clone(),
+                        location: Some(location.clone()),
+                    });
+                }
+                Ok(CExpr::Variable(name.clone()))
+            }
+            Expr::Binary {
+                op,
+                left,
+                right,
+                location: _,
+            } => {
                 let c_op = self.lower_binary_op(op);
                 Ok(CExpr::Binary {
                     op: c_op,
@@ -537,14 +590,22 @@ impl AstLowering {
                     rhs: Box::new(self.lower_expr(right)?),
                 })
             }
-            Expr::Unary { op, expr } => {
+            Expr::Unary {
+                op,
+                expr,
+                location: _,
+            } => {
                 let c_op = self.lower_unary_op(op);
                 Ok(CExpr::Unary {
                     op: c_op,
                     expr: Box::new(self.lower_expr(expr)?),
                 })
             }
-            Expr::Call { func, args } => {
+            Expr::Call {
+                func,
+                args,
+                location: _,
+            } => {
                 let lowered_args = args
                     .iter()
                     .map(|a| self.lower_expr(a))
@@ -555,16 +616,28 @@ impl AstLowering {
                     args: lowered_args,
                 })
             }
-            Expr::FieldAccess { expr, field } => Ok(CExpr::Member {
+            Expr::FieldAccess {
+                expr,
+                field,
+                location: _,
+            } => Ok(CExpr::Member {
                 base: Box::new(self.lower_expr(expr)?),
                 member: field.clone(),
-                arrow: matches!(**expr, Expr::Variable(_)),
+                arrow: matches!(**expr, Expr::Variable { .. }),
             }),
-            Expr::ArrayAccess { array, index } => Ok(CExpr::Subscript {
+            Expr::ArrayAccess {
+                array,
+                index,
+                location: _,
+            } => Ok(CExpr::Subscript {
                 base: Box::new(self.lower_expr(array)?),
                 index: Box::new(self.lower_expr(index)?),
             }),
-            Expr::Match { expr, arms } => self.lower_match(expr, arms),
+            Expr::Match {
+                expr,
+                arms,
+                location: _,
+            } => self.lower_match(expr, arms),
         }
     }
 
@@ -605,11 +678,15 @@ impl AstLowering {
 
     fn lower_match(&self, expr: &Expr, arms: &[MatchArm]) -> Result<CExpr, LoweringError> {
         // Check if we can use a switch statement
-        let can_use_switch = match expr {
-            Expr::Variable(_) => true,
-            Expr::FieldAccess { field: _, .. } => true,
-            _ => false,
-        };
+        let can_use_switch = matches!(
+            expr,
+            Expr::Variable { .. }
+                | Expr::FieldAccess {
+                    field: _,
+                    location: _,
+                    ..
+                }
+        );
 
         if !can_use_switch {
             return self.lower_match_to_ternary(expr, arms);
@@ -631,7 +708,11 @@ impl AstLowering {
                         Box::new(CStmt::Block(vec![CStmt::Expression(body), CStmt::Break])),
                     ));
                 }
-                Pattern::EnumVariant { name, .. } => {
+                Pattern::EnumVariant {
+                    name,
+                    fields: _,
+                    location: _,
+                } => {
                     let case_expr = CExpr::Variable(format!("{}_Tag", name));
                     let body = self.lower_match_arm_body(&arm.body)?;
                     cases.push(CSwitchCase::Case(
@@ -734,12 +815,16 @@ impl AstLowering {
                 rhs: Box::new(self.lower_literal(lit)),
             }),
             Pattern::Variable(_) => Ok(CExpr::LiteralInt(1)),
-            Pattern::EnumVariant { name, fields: _ } => Ok(CExpr::Binary {
+            Pattern::EnumVariant {
+                name,
+                fields: _,
+                location: _,
+            } => Ok(CExpr::Binary {
                 op: CBinaryOp::Eq,
                 lhs: Box::new(CExpr::Member {
                     base: Box::new(self.lower_expr(expr)?),
                     member: "tag".to_string(),
-                    arrow: false,
+                    arrow: matches!(expr, Expr::Variable { .. }),
                 }),
                 rhs: Box::new(CExpr::Variable(format!("{}_Tag", name))),
             }),
@@ -779,9 +864,19 @@ impl AstLowering {
     }
 }
 
+impl Default for AstLowering {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_loc() -> SourceLocation {
+        SourceLocation::new(1, 0, Some("test.c_lang".to_string()))
+    }
 
     #[test]
     fn test_lower_simple_function() {
@@ -792,18 +887,28 @@ mod tests {
                     Parameter {
                         name: "a".to_string(),
                         ty: Type::Int(IntSize::I32),
+                        location: test_loc(),
                     },
                     Parameter {
                         name: "b".to_string(),
                         ty: Type::Int(IntSize::I32),
+                        location: test_loc(),
                     },
                 ],
                 return_type: Type::Int(IntSize::I32),
                 body: Some(vec![Stmt::Return(Some(Expr::Binary {
                     op: BinaryOp::Add,
-                    left: Box::new(Expr::Variable("a".to_string())),
-                    right: Box::new(Expr::Variable("b".to_string())),
+                    left: Box::new(Expr::Variable {
+                        name: "a".to_string(),
+                        location: test_loc(),
+                    }),
+                    right: Box::new(Expr::Variable {
+                        name: "b".to_string(),
+                        location: test_loc(),
+                    }),
+                    location: test_loc(),
                 }))]),
+                location: test_loc(),
             }],
         };
 
@@ -828,6 +933,56 @@ mod tests {
     }
 
     #[test]
+    fn test_match_expr() {
+        let mut lowering = AstLowering::new();
+
+        // Add 'color' to the variables in scope for testing
+        lowering.variables_in_scope.insert("color".to_string());
+
+        let match_expr = Expr::Match {
+            expr: Box::new(Expr::Variable {
+                name: "color".to_string(),
+                location: test_loc(),
+            }),
+            arms: vec![
+                MatchArm {
+                    pattern: Pattern::EnumVariant {
+                        name: "Red".to_string(),
+                        fields: vec![],
+                        location: test_loc(),
+                    },
+                    guard: None,
+                    body: vec![Stmt::Expr(Expr::Literal(Literal::Int(1)))],
+                    location: test_loc(),
+                },
+                MatchArm {
+                    pattern: Pattern::EnumVariant {
+                        name: "RGB".to_string(),
+                        fields: vec![Pattern::Variable("rgb".to_string())],
+                        location: test_loc(),
+                    },
+                    guard: None,
+                    body: vec![Stmt::Expr(Expr::Literal(Literal::Int(2)))],
+                    location: test_loc(),
+                },
+                MatchArm {
+                    pattern: Pattern::Wildcard,
+                    guard: None,
+                    body: vec![Stmt::Expr(Expr::Literal(Literal::Int(0)))],
+                    location: test_loc(),
+                },
+            ],
+            location: test_loc(),
+        };
+
+        let result = lowering.lower_expr(&match_expr);
+        if let Err(ref e) = result {
+            println!("Error lowering match expression: {}", e);
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_lower_struct() {
         let high_level = Module {
             decls: vec![Decl::Struct(StructDef {
@@ -836,12 +991,15 @@ mod tests {
                     Field {
                         name: "x".to_string(),
                         ty: Type::Float(FloatSize::F32),
+                        location: test_loc(),
                     },
                     Field {
                         name: "y".to_string(),
                         ty: Type::Float(FloatSize::F32),
+                        location: test_loc(),
                     },
                 ],
+                location: test_loc(),
             })],
         };
 
