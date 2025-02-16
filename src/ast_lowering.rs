@@ -6,6 +6,12 @@ pub struct AstLowering {
     type_map: std::collections::HashMap<String, CType>,
 }
 
+#[derive(Debug, Clone)]
+pub enum LoweringError {
+    TypeNotFound(String),
+    InvalidType(String),
+}
+
 impl AstLowering {
     pub fn new() -> Self {
         Self {
@@ -13,7 +19,7 @@ impl AstLowering {
         }
     }
 
-    pub fn lower_module(&mut self, module: &Module) -> CFile {
+    pub fn lower_module(&mut self, module: &Module) -> Result<CFile, LoweringError> {
         let mut decls = Vec::new();
 
         // First pass: collect all type definitions
@@ -30,7 +36,7 @@ impl AstLowering {
                         .insert(enum_def.name.clone(), CType::Enum(enum_def.name.clone()));
                 }
                 Decl::Distinct(distinct_def) => {
-                    let underlying = self.lower_type(&distinct_def.underlying_type);
+                    let underlying = self.lower_type(&distinct_def.underlying_type)?;
                     self.type_map
                         .insert(distinct_def.name.clone(), underlying.clone());
                 }
@@ -47,55 +53,55 @@ impl AstLowering {
                     return_type,
                     body,
                 } => {
-                    decls.push(self.lower_function(name, params, return_type, body));
+                    decls.push(self.lower_function(name, params, return_type, body)?);
                 }
                 Decl::Struct(struct_def) => {
-                    decls.push(self.lower_struct(struct_def));
+                    decls.push(self.lower_struct(struct_def)?);
                 }
                 Decl::Enum(enum_def) => {
-                    decls.extend(self.lower_enum(enum_def));
+                    decls.extend(self.lower_enum(enum_def)?);
                 }
                 Decl::Distinct(distinct_def) => {
-                    decls.push(self.lower_distinct(distinct_def));
+                    decls.push(self.lower_distinct(distinct_def)?);
                 }
             }
         }
 
-        CFile { decls }
+        Ok(CFile { decls })
     }
 
-    fn lower_type(&self, ty: &Type) -> CType {
+    fn lower_type(&self, ty: &Type) -> Result<CType, LoweringError> {
         match ty {
-            Type::Unit => CType::Void,
-            Type::Bool => CType::Bool,
+            Type::Unit => Ok(CType::Void),
+            Type::Bool => Ok(CType::Bool),
             Type::Int(size) => match size {
-                IntSize::I8 => CType::Char, // For now, using char for i8
-                _ => CType::Int,            // TODO: Add proper int sizes to CType
+                IntSize::I8 => Ok(CType::Char),
+                _ => Ok(CType::Int), // TODO: Add proper int sizes to CType
             },
-            Type::UInt(_) => CType::Int, // TODO: Add unsigned types to CType
+            Type::UInt(_) => Ok(CType::Int), // TODO: Add unsigned types to CType
             Type::Float(size) => match size {
-                FloatSize::F32 => CType::Float,
-                FloatSize::F64 => CType::Double,
+                FloatSize::F32 => Ok(CType::Float),
+                FloatSize::F64 => Ok(CType::Double),
             },
-            Type::String => CType::Pointer(Box::new(CType::Char)),
-            Type::Array(inner, size) => CType::Array(Box::new(self.lower_type(inner)), *size),
-            Type::Slice(inner) => CType::Pointer(Box::new(self.lower_type(inner))),
-            Type::Pointer(inner) => CType::Pointer(Box::new(self.lower_type(inner))),
-            Type::Reference(inner) => CType::Pointer(Box::new(self.lower_type(inner))),
+            Type::String => Ok(CType::Pointer(Box::new(CType::Char))),
+            Type::Array(inner, size) => Ok(CType::Array(Box::new(self.lower_type(inner)?), *size)),
+            Type::Slice(inner) => Ok(CType::Pointer(Box::new(self.lower_type(inner)?))),
+            Type::Pointer(inner) => Ok(CType::Pointer(Box::new(self.lower_type(inner)?))),
+            Type::Reference(inner) => Ok(CType::Pointer(Box::new(self.lower_type(inner)?))),
             Type::Result(inner) => self.lower_type(inner), // TODO: Proper error handling
-            Type::Struct(name) => self
-                .type_map
-                .get(name)
-                .cloned()
-                .unwrap_or(CType::Struct(name.clone())),
+            Type::Struct(name) => {
+                self.type_map.get(name).cloned().ok_or_else(|| {
+                    LoweringError::TypeNotFound(format!("Struct {} not found", name))
+                })
+            }
             Type::Enum(name) => self
                 .type_map
                 .get(name)
                 .cloned()
-                .unwrap_or(CType::Enum(name.clone())),
-            Type::Distinct(name, _) => {
-                self.type_map.get(name).cloned().unwrap_or(CType::Int) // Fallback to int if not found
-            }
+                .ok_or_else(|| LoweringError::TypeNotFound(format!("Enum {} not found", name))),
+            Type::Distinct(name, _) => self.type_map.get(name).cloned().ok_or_else(|| {
+                LoweringError::TypeNotFound(format!("Distinct type {} not found", name))
+            }),
         }
     }
 
@@ -105,46 +111,50 @@ impl AstLowering {
         params: &[Parameter],
         return_type: &Type,
         body: &Option<Vec<Stmt>>,
-    ) -> CDecl {
+    ) -> Result<CDecl, LoweringError> {
         let c_params = params
             .iter()
-            .map(|p| CParam {
-                name: p.name.clone(),
-                ty: self.lower_type(&p.ty),
+            .map(|p| -> Result<CParam, LoweringError> {
+                Ok(CParam {
+                    name: p.name.clone(),
+                    ty: self.lower_type(&p.ty)?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
-        if let Some(body) = body {
+        Ok(if let Some(body) = body {
             CDecl::Function {
                 name: name.to_string(),
-                return_type: self.lower_type(return_type),
+                return_type: self.lower_type(return_type)?,
                 params: c_params,
                 body: body.iter().map(|s| self.lower_stmt(s)).collect(),
             }
         } else {
             CDecl::Prototype {
                 name: name.to_string(),
-                return_type: self.lower_type(return_type),
+                return_type: self.lower_type(return_type)?,
                 params: c_params,
             }
-        }
+        })
     }
 
-    fn lower_struct(&self, struct_def: &StructDef) -> CDecl {
-        CDecl::StructDef(CStructDef {
+    fn lower_struct(&self, struct_def: &StructDef) -> Result<CDecl, LoweringError> {
+        Ok(CDecl::StructDef(CStructDef {
             name: struct_def.name.clone(),
             members: struct_def
                 .fields
                 .iter()
-                .map(|f| CStructMember {
-                    name: f.name.clone(),
-                    ty: self.lower_type(&f.ty),
+                .map(|f| -> Result<CStructMember, LoweringError> {
+                    Ok(CStructMember {
+                        name: f.name.clone(),
+                        ty: self.lower_type(&f.ty)?,
+                    })
                 })
-                .collect(),
-        })
+                .collect::<Result<Vec<_>, _>>()?,
+        }))
     }
 
-    fn lower_enum(&self, enum_def: &EnumDef) -> Vec<CDecl> {
+    fn lower_enum(&self, enum_def: &EnumDef) -> Result<Vec<CDecl>, LoweringError> {
         let mut decls = Vec::new();
 
         // Create the enum type
@@ -167,10 +177,27 @@ impl AstLowering {
         let mut union_members = Vec::new();
         for variant in &enum_def.variants {
             if !variant.fields.is_empty() {
+                let members = variant
+                    .fields
+                    .iter()
+                    .map(|f| -> Result<CStructMember, LoweringError> {
+                        Ok(CStructMember {
+                            name: f.name.clone(),
+                            ty: self.lower_type(&f.ty)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
                 union_members.push(CStructMember {
                     name: variant.name.to_lowercase(),
                     ty: CType::Struct(format!("{}_{}", enum_def.name, variant.name)),
                 });
+
+                // Create struct for this variant
+                decls.push(CDecl::StructDef(CStructDef {
+                    name: format!("{}_{}", enum_def.name, variant.name),
+                    members,
+                }));
             }
         }
 
@@ -180,32 +207,14 @@ impl AstLowering {
         });
         decls.push(union_decl);
 
-        // Create structs for variants with data
-        for variant in &enum_def.variants {
-            if !variant.fields.is_empty() {
-                let struct_decl = CDecl::StructDef(CStructDef {
-                    name: format!("{}_{}", enum_def.name, variant.name),
-                    members: variant
-                        .fields
-                        .iter()
-                        .map(|f| CStructMember {
-                            name: f.name.clone(),
-                            ty: self.lower_type(&f.ty),
-                        })
-                        .collect(),
-                });
-                decls.push(struct_decl);
-            }
-        }
-
-        decls
+        Ok(decls)
     }
 
-    fn lower_distinct(&self, distinct_def: &DistinctDef) -> CDecl {
-        CDecl::Typedef {
+    fn lower_distinct(&self, distinct_def: &DistinctDef) -> Result<CDecl, LoweringError> {
+        Ok(CDecl::Typedef {
             name: distinct_def.name.clone(),
-            ty: CTypeSpecifier::Plain(self.lower_type(&distinct_def.underlying_type)),
-        }
+            ty: CTypeSpecifier::Plain(self.lower_type(&distinct_def.underlying_type)?),
+        })
     }
 
     fn lower_stmt(&self, stmt: &Stmt) -> CStmt {
@@ -214,8 +223,8 @@ impl AstLowering {
                 name: name.clone(),
                 ty: ty
                     .as_ref()
-                    .map(|t| self.lower_type(t))
-                    .unwrap_or(CType::Int), // Infer type from value
+                    .map(|t| self.lower_type(t).unwrap_or(CType::Int))
+                    .unwrap_or(CType::Int),
                 init: Some(self.lower_expr(value)),
             },
             Stmt::Expr(expr) => CStmt::Expression(self.lower_expr(expr)),
@@ -312,8 +321,84 @@ impl AstLowering {
     }
 
     fn lower_match(&self, expr: &Expr, arms: &[MatchArm]) -> CExpr {
-        // For now, convert match to a chain of ternary expressions
-        // TODO: Use switch when possible
+        // Check if we can use a switch statement
+        let can_use_switch = match expr {
+            Expr::Variable(_) => true,
+            Expr::FieldAccess { field: _, .. } => true,
+            _ => false,
+        };
+
+        if !can_use_switch {
+            // Fallback to ternary for complex expressions
+            return self.lower_match_to_ternary(expr, arms);
+        }
+
+        // Generate a temporary variable to hold the switch value if needed
+        let switch_var = format!("__switch_{}", self.get_unique_id());
+        let switch_expr = CExpr::Variable(switch_var.clone());
+
+        // Create switch cases
+        let mut cases = Vec::new();
+        let mut has_default = false;
+
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Literal(lit) => {
+                    let case_expr = self.lower_literal(lit);
+                    let body = self.lower_match_arm_body(&arm.body);
+                    cases.push(CSwitchCase::Case(
+                        case_expr,
+                        Box::new(CStmt::Block(vec![CStmt::Expression(body), CStmt::Break])),
+                    ));
+                }
+                Pattern::EnumVariant { name, .. } => {
+                    let case_expr = CExpr::Variable(format!("{}_Tag", name));
+                    let body = self.lower_match_arm_body(&arm.body);
+                    cases.push(CSwitchCase::Case(
+                        case_expr,
+                        Box::new(CStmt::Block(vec![CStmt::Expression(body), CStmt::Break])),
+                    ));
+                }
+                Pattern::Wildcard => {
+                    has_default = true;
+                    let body = self.lower_match_arm_body(&arm.body);
+                    cases.push(CSwitchCase::Default(Box::new(CStmt::Block(vec![
+                        CStmt::Expression(body),
+                        CStmt::Break,
+                    ]))));
+                }
+                _ => {
+                    // For complex patterns, fall back to if-else
+                    return self.lower_match_to_ternary(expr, arms);
+                }
+            }
+        }
+
+        // Add a default case if none exists
+        if !has_default {
+            cases.push(CSwitchCase::Default(Box::new(CStmt::Block(vec![
+                CStmt::Expression(CExpr::LiteralInt(0)),
+                CStmt::Break,
+            ]))));
+        }
+
+        CExpr::Block {
+            stmts: vec![
+                CStmt::Declaration {
+                    name: switch_var.clone(),
+                    ty: CType::Int, // TODO: Infer proper type
+                    init: Some(self.lower_expr(expr)),
+                },
+                CStmt::Switch {
+                    expr: switch_expr,
+                    cases,
+                },
+            ],
+            result: Some(Box::new(CExpr::LiteralInt(0))), // TODO: Return proper value
+        }
+    }
+
+    fn lower_match_to_ternary(&self, expr: &Expr, arms: &[MatchArm]) -> CExpr {
         let mut result = self.lower_default_match_arm();
 
         for arm in arms.iter().rev() {
@@ -328,6 +413,11 @@ impl AstLowering {
         }
 
         result
+    }
+
+    fn get_unique_id(&self) -> u32 {
+        // TODO: Implement proper unique ID generation
+        0
     }
 
     fn lower_pattern_check(&self, expr: &Expr, pattern: &Pattern) -> CExpr {
@@ -406,7 +496,7 @@ mod tests {
         };
 
         let mut lowering = AstLowering::new();
-        let c_ast = lowering.lower_module(&high_level);
+        let c_ast = lowering.lower_module(&high_level).unwrap();
 
         assert_eq!(c_ast.decls.len(), 1);
         match &c_ast.decls[0] {
@@ -444,7 +534,7 @@ mod tests {
         };
 
         let mut lowering = AstLowering::new();
-        let c_ast = lowering.lower_module(&high_level);
+        let c_ast = lowering.lower_module(&high_level).unwrap();
 
         assert_eq!(c_ast.decls.len(), 1);
         match &c_ast.decls[0] {

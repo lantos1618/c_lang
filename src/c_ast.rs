@@ -111,6 +111,10 @@ pub enum CExpr {
         index: Box<CExpr>,
     },
     Comma(Vec<CExpr>),
+    Block {
+        stmts: Vec<CStmt>,
+        result: Option<Box<CExpr>>,
+    },
 }
 
 #[derive(Debug, Clone)]

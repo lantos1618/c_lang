@@ -382,7 +382,8 @@ impl CWriter {
             },
             CExpr::Ternary { .. } => 3,
             CExpr::Assign { .. } => 2,
-            CExpr::Comma(_) => 1, // Lowest precedence
+            CExpr::Comma(_) => 1,
+            CExpr::Block { .. } => 0, // Lowest precedence
         }
     }
 
@@ -630,6 +631,29 @@ impl CWriter {
                     }
                     self.write_expr(expr);
                 }
+            }
+            CExpr::Block { stmts, result } => {
+                self.output.push('(');
+                self.output.push('{');
+                self.output.push('\n');
+                self.indent_level += 1;
+
+                for stmt in stmts {
+                    self.indent();
+                    self.write_stmt(stmt);
+                }
+
+                if let Some(result_expr) = result {
+                    self.indent();
+                    self.write_expr(result_expr);
+                    self.output.push(';');
+                    self.output.push('\n');
+                }
+
+                self.indent_level -= 1;
+                self.indent();
+                self.output.push('}');
+                self.output.push(')');
             }
         }
     }
