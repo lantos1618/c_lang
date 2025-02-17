@@ -101,8 +101,158 @@ test_fib() =>
     triple := make_multiplier(3)
     ctx.process_fibs(5, triple)
 
-main() => 
-    arena := std.heap.ArenaAllocator.init(std.heap.page_allocator)
-    defer arena.deinit()
+// Error type as a sum type
+Error:
+    | OutOfMemory
+    | InvalidInput: string
+    | NumberTooLarge: u64
+    | DivByZero
+
+// Result type - either success or error (shortened to Res)
+Res<T> = 
+    | res: T
+    | err: Error
+
+// Safe division example
+div(a: u64, b: u64): Res<u64> =>
+    if (b)
+        | 0 => err(DivByZero)
+        | _ => res(a / b)
+
+// Collection types
+Vec<T>:
+    data: ptr<T>
+    len: usize
+    capacity: usize
+    allocator: ptr<Allocator>
+
+// Constructor for Vec
+Vec<T>(allocator: ptr<Allocator>) =>
+    Vec {
+        data: null,
+        len: 0,
+        capacity: 0,
+        allocator
+    }
+
+// Vec methods
+push<T>(self: ref<Vec<T>>, item: T): Res<void> =>
+    if (self.len == self.capacity)
+        new_cap := if (self.capacity)
+            | 0 => 8
+            | _ => self.capacity * 2
+        
+        new_data := self.allocator.realloc(
+            self.data, 
+            new_cap * sizeof<T>
+        ) as ptr<T>
+        
+        if (new_data == null)
+            return err(OutOfMemory)
+        
+        self.data = new_data
+        self.capacity = new_cap
     
-    test_fib() 
+    self.data[self.len] = item
+    self.len = self.len + 1
+    res({})
+
+// Example of error propagation using if
+safe_average(numbers: Vec<u64>): Res<u64> =>
+    if (numbers.len)
+        | 0 => err(InvalidInput("Cannot average empty vector"))
+        | _ =>
+            sum ::= 0
+            for i in range(0, numbers.len)
+                n := numbers.data[i]
+                if (sum > u64.MAX - n)
+                    return err(NumberTooLarge(sum))
+                sum = sum + n
+            
+            div(sum, numbers.len)
+
+// Using try operator (?) for cleaner error propagation
+fibonacci_safe(n: u64): Res<u64> =>
+    if (n > 93)
+        return err(NumberTooLarge(n))
+
+    if (n)
+        | <= 1 => res(n)
+        | _ =>
+            a := fibonacci_safe(n - 1)?
+            b := fibonacci_safe(n - 2)?
+            if (a > u64.MAX - b)
+                err(NumberTooLarge(a))
+            else
+                res(a + b)
+
+// Updated FibCtx to handle errors
+fib_memo_safe(self: ref<FibCtx>, n: u64): Res<u64> =>
+    // Check cache first
+    if (self.cache.get(n))
+        | some => res(some)
+        | none =>
+            if (n > 93)
+                return err(NumberTooLarge(n))
+                
+            result := if (n)
+                | <= 1 => res(n)
+                | _ =>
+                    a := self.fib_memo_safe(n - 1)?
+                    b := self.fib_memo_safe(n - 2)?
+                    if (a > u64.MAX - b)
+                        err(NumberTooLarge(a))
+                    else
+                        res(a + b)
+            
+            // Only cache successful results
+            if (result)
+                | res: u64 => self.cache.insert(n, res)
+                | err => {}
+            
+            result
+
+// Example usage with error handling
+test_safe_fib() =>
+    ctx := FibCtx(std.heap.page_allocator)
+    defer ctx.deinit()
+    
+    std.debug.print("Safe fibonacci examples:")
+    
+    // Pattern matching on results
+    if (ctx.fib_memo_safe(10))
+        | res: u64 => std.debug.print("Fib(10) = {}", res)
+        | err: Error => std.debug.print("Error: {}", err)
+    
+    calculate_and_print(n: u64): Res<void> =>
+        result := ctx.fib_memo_safe(n)?
+        std.debug.print("Fib({}) = {}", n, result)
+        res({})
+
+    // Try some calculations
+    test_nums := Vec<u64>.from_slice(std.heap.page_allocator, [5, 10, 90, 95])
+    defer test_nums.deinit()
+    
+    for i in range(0, test_nums.len)
+        n := test_nums.data[i]
+        if (calculate_and_print(n))
+            | err: Error => std.debug.print("Error for n={}: {}", n, err)
+            | res => {}
+
+// Helper to create Vec from array literal
+from_slice<T>(allocator: ptr<Allocator>, items: raw[T]): Vec<T> =>
+    vec := Vec<T>(allocator)
+    for i in range(0, items.len)
+        vec.push(items[i]) catch unreachable
+    vec
+
+// Cleanup for Vec
+deinit<T>(self: ref<Vec<T>>) =>
+    if (self.data != null)
+        self.allocator.free(self.data as ptr<u8>)
+        self.data = null
+        self.len = 0
+        self.capacity = 0
+
+main() =>
+    test_safe_fib() 
