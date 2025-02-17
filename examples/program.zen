@@ -1,0 +1,108 @@
+RGB: 
+    r: u8
+    g: u8
+    b: u8
+
+RGB(r: u8, g: u8, b: u8) => RGB { r, g, b }
+
+Red = RGB(255, 0, 0)
+Green = RGB(0, 255, 0)
+Blue = RGB(0, 0, 255)
+
+Color:
+    | rgb: RGB
+    | hsl: HSL
+    | red: Red
+    | green: Green
+    | blue: blue
+
+// Allocator interface
+Allocator:
+    alloc: fn(size: usize) -> ptr<u8>
+    free: fn(ptr: ptr<u8>) -> void
+    realloc: fn(ptr: ptr<u8>, new_size: usize) -> ptr<u8>
+
+// Type alias for a function that processes numbers
+NumProcessor = fn(u64) -> u64
+
+// Regular fibonacci implementation
+fib(n: u64): u64 =>
+    if (n)
+        | <= 1 => n
+        | _ => fib(n - 1) + fib(n - 2)
+
+FibCache = Map<u64, u64>
+
+// Fibonacci context with allocator
+FibCtx:
+    allocator: ptr<Allocator>
+    cache: FibCache
+
+// Constructor for FibCtx
+FibCtx(allocator: ptr<Allocator>) => 
+    ctx := FibCtx {
+        allocator,
+        cache: FibCache.init(allocator)
+    }
+    ctx
+
+// Regular fibonacci
+fib(self: ref<FibCtx>, n: u64): u64 =>
+    if (n)
+        | <= 1 => n
+        | _ => self.fib(n - 1) + self.fib(n - 2)
+
+// Memoized fibonacci
+fib_memo(self: ref<FibCtx>, n: u64): u64 =>
+    if (self.cache.get(n))
+        | some => some
+        | none =>
+            result ::= 0
+            result = if (n)
+                | <= 1 => n
+                | _ => 
+                    a := self.fib_memo(n - 1)
+                    b := self.fib_memo(n - 2)
+                    a + b
+            self.cache.insert(n, result)
+            result
+
+// Process numbers with callback
+process_fibs(ref<FibCtx> self, max: u64, processor: fn(u64) -> u64) =>
+    buffer := self.allocator.alloc(max * 8)
+    defer self.allocator.free(buffer)
+
+    counter ::= 0
+    while counter < max
+        result := processor(self.fib(counter))
+        std.debug.print(result)
+        counter = counter + 1
+
+// Cleanup
+deinit(ref<FibCtx> self) =>
+    self.cache.deinit()
+
+// Example usage
+test_fib() =>
+    // Create fibonacci context
+    ctx := FibCtx(std.heap.page_allocator)
+    defer ctx.deinit()
+    
+    std.debug.print("Regular fibonacci:")
+    ctx.process_fibs(10, n => n * 2)
+    
+    std.debug.print("Memoized fibonacci:")
+    std.debug.print(ctx.fib_memo(10))
+
+    // Higher order function example
+    make_multiplier(factor: u64): fn(u64) -> u64 =>
+        n => n * factor
+    
+    triple := make_multiplier(3)
+    ctx.process_fibs(5, triple)
+
+main() => 
+    arena := std.heap.ArenaAllocator.init(std.heap.page_allocator)
+    defer arena.deinit()
+    
+    test_fib() 
